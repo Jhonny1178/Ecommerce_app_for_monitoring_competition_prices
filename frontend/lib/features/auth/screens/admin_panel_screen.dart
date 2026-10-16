@@ -687,7 +687,6 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                           tooltip: 'Odśwież',
                           onPressed: _refreshData,
                         ),
-                        IconButton(icon: const Icon(Icons.notifications_none, size: 28), onPressed: () {}),
                         PopupMenuButton<String>(
                           offset: const Offset(0, 50),
                           icon: const Icon(Icons.account_circle_outlined, size: 28),
