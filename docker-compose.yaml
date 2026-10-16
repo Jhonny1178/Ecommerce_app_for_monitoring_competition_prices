@@ -84,6 +84,7 @@ x-airflow-common:
     - ./airflow/plugins:/opt/airflow/plugins
     - ./ecommerce_price_comparer:/opt/airflow/dags/ecommerce_price_comparer
     - ./storage/file_folder:/shared/onboarding
+    - ./tests:/opt/airflow/tests
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

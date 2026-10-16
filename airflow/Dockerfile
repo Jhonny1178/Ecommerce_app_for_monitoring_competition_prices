@@ -25,4 +25,6 @@ RUN PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{s
       itemadapter \
       scrapy-rotating-proxies \
       scrapeops-scrapy-proxy-sdk \
+      pytest \
+      pytest-mock \
     && pip uninstall -y typing || true
