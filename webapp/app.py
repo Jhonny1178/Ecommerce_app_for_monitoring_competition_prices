@@ -354,6 +354,11 @@ def api_comparison():
         table_products = f"{prefix}_products"
         table_mappings = f"{prefix}_product_mappings"
 
+        cur.execute("SELECT to_regclass(%s) AS table_ref", (f"public.{table_mappings}",))
+        if not cur.fetchone()['table_ref']:
+            cur.close(); conn.close()
+            return jsonify({"ok": True, "data": [], "shops": COMPETITOR_TABLES})
+
         for table, label in COMPETITOR_TABLES.items():
             if shop and table != shop:
                 continue
@@ -447,6 +452,11 @@ def api_comparison_summary():
         table_mappings   = f"{prefix}_product_mappings"
         competitor_table = f"{prefix}_competitors"
         COMPETITOR_TABLES = {competitor_table: "Rynek (Konkurencja)"}
+
+        cur.execute("SELECT to_regclass(%s) AS table_ref", (f"public.{table_mappings}",))
+        if not cur.fetchone()['table_ref']:
+            cur.close(); conn.close()
+            return jsonify({"ok": True, "summary": []})
 
         summary = []
         for table, label in COMPETITOR_TABLES.items():
