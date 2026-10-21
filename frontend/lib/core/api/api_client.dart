@@ -1,25 +1,26 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
-import 'package:http/browser_client.dart';
 import 'package:http/http.dart' as http;
+import 'package:tonten/core/api/client_factory_io.dart'
+    if (dart.library.js_interop) 'package:tonten/core/api/client_factory_web.dart';
 import 'package:tonten/features/auth/screens/login_screen.dart';
 
 class ApiClient {
   static GlobalKey<NavigatorState> navigatorKey =
       GlobalKey<NavigatorState>();
 
-  static final http.Client _client = _createClient();
+  static http.Client _client = createPlatformClient();
 
   static bool _isHandlingUnauthorized = false;
 
-  static http.Client _createClient() {
-    if (kIsWeb) {
-      final client = BrowserClient();
-      client.withCredentials = true;
-      return client;
-    }
+  @visibleForTesting
+  static void setClient(http.Client client) {
+    _client = client;
+  }
 
-    return http.Client();
+  @visibleForTesting
+  static void resetClient() {
+    _client = createPlatformClient();
   }
 
   static const String baseUrl = 'http://localhost:6767';
