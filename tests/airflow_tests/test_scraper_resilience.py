@@ -9,7 +9,7 @@ if not DAG_FILE_PATH:
         DAG_FILE_PATH = "/opt/airflow/dags/Dag.py"
     else:
         DAG_FILE_PATH = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "airflow", "dags", "Dag.py")
+            os.path.join(os.path.dirname(__file__), "..", "..", "airflow", "dags", "Dag.py")
         )
 
 DAG_DIR = os.path.dirname(DAG_FILE_PATH)
