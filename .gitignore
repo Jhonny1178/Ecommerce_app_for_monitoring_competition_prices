@@ -1,4 +1,5 @@
 .venv/
+.venv.nosync/
 venv/
 ENV/
 **/__pycache__/

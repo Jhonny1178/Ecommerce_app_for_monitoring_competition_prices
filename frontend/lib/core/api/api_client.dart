@@ -23,7 +23,8 @@ class ApiClient {
     _client = createPlatformClient();
   }
 
-  static const String baseUrl = 'http://localhost:6767';
+  static const String baseUrl =
+      String.fromEnvironment('API_BASE_URL', defaultValue: '');
 
   static Uri _buildUri(Uri url) {
     if (url.hasScheme) {
