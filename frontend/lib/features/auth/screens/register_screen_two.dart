@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:tonten/core/api/api_client.dart';
+import 'package:tonten/core/utils/validators.dart';
 import 'dart:convert';
+import 'auth_router.dart';
 
 class RegisterScreenTwo extends StatefulWidget {
   final VoidCallback onBack;
@@ -30,8 +32,58 @@ class _RegisterScreenTwoState extends State<RegisterScreenTwo> {
   final List<TextEditingController> _competitors = [TextEditingController()];
 
   bool _isLoading = false;
+  bool _showUrlErrors = false;
+
+  Future<void> _logInAfterRegistration() async {
+    try {
+      final response = await ApiClient.post(
+        Uri.parse("/api/login"),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': widget.email, 'password': widget.password}),
+      );
+      final data = jsonDecode(response.body);
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200 && data['ok'] == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Konto zostało utworzone. Analizujemy podane sklepy, a w tym czasie możesz wypełnić formularz.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => AuthRouter(
+              status: data['status']?.toString() ?? 'onboarding_required',
+              isAdmin: false,
+            ),
+          ),
+          (route) => false,
+        );
+        return;
+      }
+    } catch (e) {
+      debugPrint('Automatyczne logowanie nie powiodło się: $e');
+    }
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Konto zostało utworzone. Zaloguj się, aby wypełnić dalsze kroki.'),
+        backgroundColor: Colors.green,
+      ),
+    );
+    widget.onSuccess();
+  }
 
   Future<void> _submitRegistration() async {
+    if (_competitors.any((controller) => !Validators.isWebsiteUrl(controller.text))) {
+      setState(() => _showUrlErrors = true);
+      return;
+    }
+
     setState(() => _isLoading = true);
 
     try {
@@ -45,17 +97,14 @@ class _RegisterScreenTwoState extends State<RegisterScreenTwo> {
           'company_domain': _mainDomainController.text, 
           'email': widget.email,
           'password': widget.password,
-          'urls': _competitors.map((c) => c.text).where((text) => text.isNotEmpty).toList(),
+          'urls': _competitors.map((c) => c.text.trim()).where((text) => text.isNotEmpty).toList(),
         }),
       );
 
       final data = jsonDecode(response.body);
 
       if (response.statusCode == 200 && data['ok'] == true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(data['message'] ?? 'Sukces!'), backgroundColor: Colors.green),
-        );
-        widget.onSuccess();
+        await _logInAfterRegistration();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(data['error'] ?? 'Błąd rejestracji'), backgroundColor: Theme.of(context).colorScheme.error),
@@ -66,7 +115,9 @@ class _RegisterScreenTwoState extends State<RegisterScreenTwo> {
         SnackBar(content: Text('Błąd połączenia: $e'), backgroundColor: Theme.of(context).colorScheme.error),
       );
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -123,7 +174,29 @@ class _RegisterScreenTwoState extends State<RegisterScreenTwo> {
             ),
           ),
           const SizedBox(height: 24),
-          
+
+          Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: colorScheme.secondaryContainer,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline, color: colorScheme.onSecondaryContainer),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Po wysłaniu wniosku przeanalizujemy podane sklepy konkurencji. Status wniosku będzie widoczny na Twojej stronie po zalogowaniu.',
+                    style: TextStyle(color: colorScheme.onSecondaryContainer),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
           if (_competitors.length < 5)
             Padding(
               padding: const EdgeInsets.only(bottom: 16.0),
@@ -182,6 +255,9 @@ class _RegisterScreenTwoState extends State<RegisterScreenTwo> {
                         labelText: 'Domena sklepu konkurencji nr ${index + 1}',
                         hintText: 'Wpisz domenę sklepu konkurencji...',
                         border: const UnderlineInputBorder(),
+                        errorText: _showUrlErrors && !Validators.isWebsiteUrl(_competitors[index].text)
+                            ? Validators.invalidWebsite
+                            : null,
                       ),
                     ),
                   ),

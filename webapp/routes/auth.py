@@ -1,4 +1,5 @@
 from flask import Blueprint, request, session, jsonify
+import glob
 import json
 import os
 import traceback
@@ -6,6 +7,7 @@ import smtplib
 from email.message import EmailMessage
 import string
 import random
+import re
 import datetime
 from zoneinfo import ZoneInfo
 import psycopg2
@@ -14,13 +16,26 @@ from psycopg2 import errors
 import requests
 from werkzeug.utils import secure_filename
 
-from utils import get_db, get_db_transaction, hash_password, admin_required
+from utils import get_db, get_db_transaction, hash_password, admin_required, is_existing_website
 from services.provisioning import provision_client_from_request
 
 
 auth_bp = Blueprint("auth", __name__)
 
 UPLOAD_ROOT = os.environ.get("ONBOARDING_UPLOAD_DIR", "/tmp/onboarding")
+
+MAX_COMPETITOR_URLS = 5
+EMAIL_PATTERN = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
+
+
+def _forbidden_url_response(competitor_urls, *other_urls):
+    if len(competitor_urls) > MAX_COMPETITOR_URLS:
+        return jsonify({"ok": False, "error": f"Można podać maksymalnie {MAX_COMPETITOR_URLS} adresów konkurencji"}), 400
+
+    for url in (*other_urls, *competitor_urls):
+        if url and not is_existing_website(url):
+            return jsonify({"ok": False, "error": f"Nie znaleziono strony pod adresem: {url}. Sprawdź, czy link jest poprawny."}), 400
+    return None
 
 
 # ============================================================
@@ -125,6 +140,30 @@ def _trigger_scraper_generator_async(request_id, user_id, store_slug, urls):
         args=(payload,),
         daemon=True,
     ).start()
+
+
+def _remove_rejected_application_files(user_id, request_ids):
+    warning = None
+
+    try:
+        for path in glob.glob(os.path.join(UPLOAD_ROOT, f"user_{user_id}_*")):
+            os.remove(path)
+    except OSError as e:
+        print(f"Failed to remove uploaded files of user {user_id}: {e}")
+        warning = "Wniosek odrzucono, ale nie udało się usunąć przesłanego pliku."
+
+    for request_id in request_ids:
+        try:
+            response = requests.delete(
+                f"http://ai_generator:8080/api/requests/{request_id}/spiders",
+                timeout=10,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to remove spiders of request {request_id}: {e}")
+            warning = "Wniosek odrzucono, ale nie udało się usunąć plików scrapera."
+
+    return warning
 
 
 def _attach_scrapers_to_client(cur, request_id, client_id, store_prefix, admin_user_id):
@@ -500,6 +539,12 @@ def api_register():
             "error": "Wypełnij wszystkie pola!"
         }), 400
 
+    if not EMAIL_PATTERN.fullmatch(email):
+        return jsonify({
+            "ok": False,
+            "error": "Podaj poprawny adres e-mail"
+        }), 400
+
     if len(password) < 6 or not any(char.isdigit() for char in password):
         return jsonify({
             "ok": False,
@@ -511,6 +556,10 @@ def api_register():
             "ok": False,
             "error": "Provide at least one competitor URL!"
         }), 400
+
+    forbidden = _forbidden_url_response(competitor_urls, website_url)
+    if forbidden:
+        return forbidden
 
     hashed = hash_password(password)
     urls_json = json.dumps(competitor_urls)
@@ -773,10 +822,9 @@ def _save_onboarding_submission():
     website_url = request.form.get("website_url", "").strip() or None
     source_url = request.form.get("source_url", "").strip() or None
 
-    competitor_urls = _normalize_list(
-        request.form.get("competitor_urls")
-        or request.form.get("urls")
-    )
+    forbidden = _forbidden_url_response([], website_url, source_url)
+    if forbidden:
+        return forbidden
 
     field_mapping_raw = request.form.get("field_mapping", "{}")
 
@@ -840,8 +888,7 @@ def _save_onboarding_submission():
             SELECT
                 id,
                 client_id,
-                requested_store_name,
-                competitor_urls
+                requested_store_name
             FROM onboarding_requests
             WHERE user_id = %s
               AND status IN (
@@ -869,9 +916,6 @@ def _save_onboarding_submission():
 
         if not store_name:
             store_name = onboarding_request["requested_store_name"]
-
-        if not competitor_urls:
-            competitor_urls = _normalize_list(onboarding_request.get("competitor_urls"))
 
         cur.execute("""
             DELETE FROM onboarding_sources
@@ -930,7 +974,6 @@ def _save_onboarding_submission():
             SET requested_store_name = %s,
                 company_domain = COALESCE(%s, company_domain),
                 website_url = COALESCE(%s, website_url),
-                competitor_urls = %s::jsonb,
                 source_type = %s,
                 source_path = %s,
                 source_url = %s,
@@ -943,7 +986,6 @@ def _save_onboarding_submission():
             store_name,
             company_domain,
             website_url,
-            json.dumps(competitor_urls),
             source_type,
             source_path,
             source_url,
@@ -956,12 +998,10 @@ def _save_onboarding_submission():
             UPDATE users
             SET status = 'awaiting_payment',
                 company_domain = COALESCE(%s, company_domain),
-                competitor_urls = %s::jsonb,
                 updated_at = NOW()
             WHERE id = %s
         """, (
             company_domain,
-            json.dumps(competitor_urls),
             user_id
         ))
 
@@ -1087,7 +1127,7 @@ def api_send_message():
                 is_reviewed
             )
             VALUES (%s, 'Klient', %s, 'Zgłoszony', FALSE)
-        """, (user_id, "Wiadomość od klienta: " + message))
+        """, (user_id, f"Wiadomość od {username}: {message}"))
         conn.commit()
         cur.close()
         conn.close()
@@ -1303,6 +1343,7 @@ def admin_approve_user():
         cur.execute("""
             UPDATE clients
             SET spiders_to_run = %s,
+                is_active = TRUE,
                 updated_at = NOW()
             WHERE id = %s
         """, (
@@ -1369,7 +1410,7 @@ def admin_reject_user():
 
     user_id = data.get("user_id")
     request_id = data.get("request_id")
-    reason = data.get("reason", "Brak powodu")
+    reason = data.get("reason", "Odrzucono przez administratora")
 
     if not user_id and not request_id:
         return jsonify({
@@ -1378,6 +1419,7 @@ def admin_reject_user():
         }), 400
 
     conn = get_db_transaction()
+    cur = None
 
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -1385,10 +1427,10 @@ def admin_reject_user():
         if request_id:
             cur.execute("""
                 SELECT
-                    r.id,
                     r.user_id,
                     u.username,
-                    u.first_name
+                    u.first_name,
+                    u.client_id
                 FROM onboarding_requests r
                 JOIN users u ON u.id = r.user_id
                 WHERE r.id = %s
@@ -1397,10 +1439,10 @@ def admin_reject_user():
         else:
             cur.execute("""
                 SELECT
-                    r.id,
                     r.user_id,
                     u.username,
-                    u.first_name
+                    u.first_name,
+                    u.client_id
                 FROM onboarding_requests r
                 JOIN users u ON u.id = r.user_id
                 WHERE r.user_id = %s
@@ -1412,67 +1454,80 @@ def admin_reject_user():
 
         if not onboarding_request:
             conn.rollback()
-            cur.close()
-            conn.close()
             return jsonify({
                 "ok": False,
                 "error": "Onboarding request not found"
             }), 404
 
+        if onboarding_request["client_id"]:
+            conn.rollback()
+            return jsonify({
+                "ok": False,
+                "error": "Nie można odrzucić zatwierdzonego klienta"
+            }), 409
+
+        rejected_user_id = onboarding_request["user_id"]
+
+        cur.execute("SELECT id FROM onboarding_requests WHERE user_id = %s", (rejected_user_id,))
+        request_ids = [row["id"] for row in cur.fetchall()]
+
         cur.execute("""
-            UPDATE onboarding_requests
-            SET status = 'rejected',
-                rejection_reason = %s,
-                updated_at = NOW()
-            WHERE id = %s
-        """, (
-            reason,
-            onboarding_request["id"]
-        ))
+            DELETE FROM scraper_registry
+            WHERE request_id = ANY(%s)
+              AND client_id IS NULL
+        """, (request_ids,))
+
+        cur.execute("DELETE FROM scraper_logs WHERE user_id = %s", (rejected_user_id,))
+        cur.execute("DELETE FROM onboarding_requests WHERE user_id = %s", (rejected_user_id,))
 
         cur.execute("""
             UPDATE users
             SET status = 'rejected',
                 rejection_reason = %s,
+                company_domain = NULL,
+                competitor_urls = '[]'::jsonb,
                 updated_at = NOW()
             WHERE id = %s
         """, (
             reason,
-            onboarding_request["user_id"]
+            rejected_user_id
         ))
 
         conn.commit()
 
-        user_email = onboarding_request["username"]
-        user_first_name = onboarding_request["first_name"]
-
-        cur.close()
-        conn.close()
-
-        if user_email:
-            send_email(
-                "Twój wniosek do e-ROCH został odrzucony",
-                (
-                    f"Witaj {user_first_name},\n\n"
-                    f"Niestety, Twój wniosek o założenie konta został odrzucony.\n"
-                    f"Powód: {reason}"
-                ),
-                to_email=user_email
-            )
-
-        return jsonify({
-            "ok": True,
-            "message": "User rejected."
-        })
-
     except Exception as e:
         traceback.print_exc()
         conn.rollback()
-        conn.close()
         return jsonify({
             "ok": False,
             "error": str(e)
         }), 500
+
+    finally:
+        if cur:
+            cur.close()
+        conn.close()
+
+    warning = _remove_rejected_application_files(rejected_user_id, request_ids)
+
+    send_email(
+        "Twój wniosek do e-ROCH został odrzucony",
+        (
+            f"Witaj {onboarding_request['first_name']},\n\n"
+            "Niestety, Twój wniosek o założenie konta został odrzucony.\n"
+            "Po zalogowaniu możesz napisać do nas wiadomość."
+        ),
+        to_email=onboarding_request["username"]
+    )
+
+    result = {
+        "ok": True,
+        "message": "User rejected."
+    }
+    if warning:
+        result["warning"] = warning
+
+    return jsonify(result)
 
 
 @auth_bp.route("/api/admin/registration_requests", methods=["GET"])
@@ -1556,6 +1611,7 @@ def admin_user_logs(user_id):
 
         cur.execute("""
             SELECT
+                username AS email,
                 first_name,
                 last_name,
                 company_domain,

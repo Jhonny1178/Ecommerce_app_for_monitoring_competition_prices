@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:tonten/core/api/api_client.dart';
+import 'package:tonten/core/utils/validators.dart';
 
 import 'auth_router.dart';
 import 'login_screen.dart';
@@ -22,10 +23,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
   final _companyDomainController = TextEditingController();
   final _websiteUrlController = TextEditingController();
   final _sourceUrlController = TextEditingController();
-
-  final List<TextEditingController> _competitorControllers = [
-    TextEditingController(),
-  ];
 
   final List<_MappingRow> _mappingRows = [
     _MappingRow('NAZWA', 'name'),
@@ -65,10 +62,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
     _websiteUrlController.dispose();
     _sourceUrlController.dispose();
     _messageController.dispose();
-
-    for (final controller in _competitorControllers) {
-      controller.dispose();
-    }
 
     for (final row in _mappingRows) {
       row.externalController.dispose();
@@ -140,24 +133,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
           source['source_url']?.toString() ??
           '';
 
-      final competitors = request['competitor_urls'] as List? ??
-          user['competitor_urls'] as List? ??
-          [];
-
-      if (competitors.isNotEmpty) {
-        for (final c in _competitorControllers) {
-          c.dispose();
-        }
-
-        _competitorControllers
-          ..clear()
-          ..addAll(
-            competitors.map(
-              (url) => TextEditingController(text: url.toString()),
-            ),
-          );
-      }
-
       if (mappings.isNotEmpty) {
         for (final row in _mappingRows) {
           row.externalController.dispose();
@@ -214,11 +189,58 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
     return mapping;
   }
 
-  List<String> _buildCompetitorUrls() {
-    return _competitorControllers
-        .map((controller) => controller.text.trim())
-        .where((value) => value.isNotEmpty)
-        .toList();
+  String? _validateOptionalWebsite(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.isNotEmpty && !Validators.isWebsiteUrl(text)) {
+      return Validators.invalidWebsite;
+    }
+    return null;
+  }
+
+  Future<bool> _confirmSubmission(Map<String, String> fieldMapping) async {
+    final source = _sourceType == 'local'
+        ? _pickedFile?.name ?? ''
+        : _sourceUrlController.text.trim();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Czy na pewno chcesz wysłać formularz?'),
+        content: SizedBox(
+          width: 500,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Sprawdź poniższe dane. Po wysłaniu formularza części z nich nie będzie można już zmienić.',
+                ),
+                const SizedBox(height: 16),
+                Text('Sklep: ${_storeNameController.text.trim()}'),
+                Text('Domena: ${_companyDomainController.text.trim()}'),
+                Text('Źródło produktów: $source'),
+                Text('Format danych: ${_fileFormat.toUpperCase()}'),
+                Text('Zmapowane pola: ${fieldMapping.length}'),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Wróć do edycji'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Tak, wyślij formularz'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
   }
 
   Future<void> _submitOnboarding() async {
@@ -248,6 +270,10 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
       return;
     }
 
+    if (!await _confirmSubmission(fieldMapping) || !mounted) {
+      return;
+    }
+
     setState(() => _isSaving = true);
 
     try {
@@ -261,7 +287,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
       request.fields['store_name'] = _storeNameController.text.trim();
       request.fields['company_domain'] = _companyDomainController.text.trim();
       request.fields['website_url'] = _websiteUrlController.text.trim();
-      request.fields['competitor_urls'] = jsonEncode(_buildCompetitorUrls());
       request.fields['field_mapping'] = jsonEncode(fieldMapping);
 
       if (_sourceType == 'url') {
@@ -386,12 +411,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
     }
   }
 
-  void _addCompetitorField() {
-    setState(() {
-      _competitorControllers.add(TextEditingController());
-    });
-  }
-
   void _addMappingRow() {
     setState(() {
       _mappingRows.add(_MappingRow('', ''));
@@ -433,7 +452,7 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Po akceptacji przez administratora musimy wiedzieć, skąd pobierać Twoje produkty i jak mapować pola z pliku/feedu.',
+                  'Analizujemy podane przez Ciebie sklepy konkurencji. W czasie oczekiwania na akceptację wniosku możesz wypełnić ten formularz: wskaż, skąd pobierać Twoje produkty i jak dopasować pola z pliku lub feedu. Dzięki temu sprawdzimy, czy możemy połączyć dane z Twoim sklepem.',
                   style: TextStyle(color: colorScheme.onSurfaceVariant),
                 ),
                 const SizedBox(height: 32),
@@ -472,6 +491,7 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
                     labelText: 'Link do sklepu, np. https://mojsklep.pl',
                     border: OutlineInputBorder(),
                   ),
+                  validator: _validateOptionalWebsite,
                 ),
 
                 const SizedBox(height: 32),
@@ -551,7 +571,7 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
                           (value == null || value.trim().isEmpty)) {
                         return 'Podaj URL źródła.';
                       }
-                      return null;
+                      return _validateOptionalWebsite(value);
                     },
                   ),
                 ],
@@ -621,54 +641,6 @@ class _FileUploadScreenState extends State<FileUploadScreen> {
                     onPressed: _addMappingRow,
                     icon: const Icon(Icons.add),
                     label: const Text('Dodaj mapowanie'),
-                  ),
-                ),
-
-                const SizedBox(height: 32),
-
-                _sectionTitle(context, '4. Linki konkurencji'),
-
-                ..._competitorControllers.asMap().entries.map((entry) {
-                  final index = entry.key;
-                  final controller = entry.value;
-
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: TextFormField(
-                            controller: controller,
-                            decoration: InputDecoration(
-                              labelText: 'URL konkurencji ${index + 1}',
-                              border: const OutlineInputBorder(),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          tooltip: 'Usuń link',
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: _competitorControllers.length <= 1
-                              ? null
-                              : () {
-                                  setState(() {
-                                    controller.dispose();
-                                    _competitorControllers.removeAt(index);
-                                  });
-                                },
-                        ),
-                      ],
-                    ),
-                  );
-                }),
-
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: _addCompetitorField,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Dodaj konkurencję'),
                   ),
                 ),
 

@@ -5,6 +5,52 @@ import '../../main.dart';
 
 class DialogUtils {
 
+  static Future<bool> confirmRejection(BuildContext context, String? email) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Czy na pewno chcesz odrzucić wniosek?'),
+        content: SizedBox(
+          width: 450,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Przed odrzuceniem warto skontaktować się z użytkownikiem:'),
+              const SizedBox(height: 8),
+              SelectableText(
+                email ?? 'Brak adresu e-mail',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Odrzucenie usunie wniosek, wygenerowane scrapery i przesłany plik. Tego nie można cofnąć. '
+                'Konto zostanie, a użytkownik po zalogowaniu zobaczy informację o odrzuceniu i będzie mógł napisać do nas wiadomość.',
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Anuluj'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            child: const Text('Tak, odrzuć wniosek'),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed == true;
+  }
+
   static void showSettingsDialog(BuildContext context) {
     showDialog(
       context: context,

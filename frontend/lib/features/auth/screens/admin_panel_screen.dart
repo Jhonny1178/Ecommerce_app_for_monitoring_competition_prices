@@ -426,6 +426,12 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     Map<String, dynamic> req, {
     bool closeDialog = false,
   }) async {
+    final confirmed = await DialogUtils.confirmRejection(
+      context,
+      req['email']?.toString() ?? req['username']?.toString(),
+    );
+    if (!confirmed) return;
+
     try {
       final requestId = req['request_id'];
       final userId = req['user_id'] ?? req['id'];
@@ -450,7 +456,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
 
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: const Text('Wniosek został odrzucony.'),
+              content: Text(data['warning']?.toString() ?? 'Wniosek został odrzucony.'),
               backgroundColor: Theme.of(context).colorScheme.tertiary,
             ),
           );

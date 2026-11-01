@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:tonten/core/utils/validators.dart';
 
 class RegisterScreenOne extends StatefulWidget {
   final Function(String name, String surname, String email, String password) onNext;
@@ -62,8 +63,8 @@ class _RegisterScreenOneState extends State<RegisterScreenOne> {
                 final password = _passwordController.text;
                 bool hasError = false;
                 
-                if (!email.contains('@')) {
-                  _emailError = 'Brak znaku @ w adresie e-mail';
+                if (!Validators.isEmail(email)) {
+                  _emailError = Validators.invalidEmail;
                   hasError = true;
                 }
                 if (password.length < 6 || !password.contains(RegExp(r'\d'))) {

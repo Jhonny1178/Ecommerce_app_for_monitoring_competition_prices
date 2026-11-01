@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:tonten/core/api/api_client.dart';
+import 'package:tonten/core/utils/dialog_utils.dart';
 import 'dart:convert';
 
 class AdminUserDetailsScreen extends StatefulWidget {
@@ -66,43 +67,38 @@ class _AdminUserDetailsScreenState extends State<AdminUserDetailsScreen> {
     }
   }
 
-  Future<void> _rejectUser(String reason) async {
+  Future<void> _rejectUser() async {
+    final confirmed = await DialogUtils.confirmRejection(context, _user?['email']?.toString());
+    if (!confirmed) return;
+
     try {
       final response = await ApiClient.post(
         Uri.parse("/api/admin/reject_user"),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'user_id': widget.userId, 'reason': reason}),
+        body: jsonEncode({'user_id': widget.userId}),
       );
+      final data = jsonDecode(response.body);
+
+      if (!mounted) return;
+
       if (response.statusCode == 200) {
-        if (mounted) Navigator.of(context).pop();
+        if (data['warning'] != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(data['warning'].toString()), backgroundColor: Colors.orange),
+          );
+        }
+        Navigator.of(context).pop();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(data['error']?.toString() ?? 'Nie udało się odrzucić wniosku.'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     } catch (e) {
       debugPrint("Error rejecting user: $e");
     }
-  }
-
-  void _showRejectDialog() {
-    final controller = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Odrzuć wniosek'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(labelText: 'Powód odrzucenia'),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Anuluj')),
-          FilledButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              _rejectUser(controller.text);
-            },
-            child: const Text('Odrzuć'),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _buildTimeline(List<dynamic> urlLogs, ColorScheme colorScheme) {
@@ -251,7 +247,7 @@ class _AdminUserDetailsScreenState extends State<AdminUserDetailsScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton(
-                    onPressed: _showRejectDialog,
+                    onPressed: _rejectUser,
                     style: OutlinedButton.styleFrom(foregroundColor: Colors.red, padding: const EdgeInsets.all(16)),
                     child: const Text('Odrzuć wniosek'),
                   ),

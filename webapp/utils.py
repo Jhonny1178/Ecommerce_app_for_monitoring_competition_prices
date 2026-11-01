@@ -5,8 +5,10 @@ from psycopg2 import sql
 import psycopg2.extras
 import hashlib
 import re
+import socket
 import unicodedata
 from functools import wraps
+from urllib.parse import urlparse
 from flask import session, redirect, url_for, flash,request,jsonify,Blueprint
 
 DB_CONFIG = {
@@ -28,6 +30,33 @@ def get_db_transaction():
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
+
+WEBSITE_HOST_PATTERN = re.compile(r"(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\W\d_]{2,}")
+
+
+def is_existing_website(url: str) -> bool:
+    if "://" not in url:
+        url = f"https://{url}"
+
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+
+    if parsed.scheme not in ("http", "https"):
+        return False
+
+    if not hostname or not WEBSITE_HOST_PATTERN.fullmatch(hostname):
+        return False
+
+    try:
+        socket.getaddrinfo(hostname, None)
+    except (socket.gaierror, ValueError):
+        return False
+
+    return True
+
 
 def generate_store_prefix(raw_name: str) -> str:
     value = unicodedata.normalize("NFKD", str(raw_name))

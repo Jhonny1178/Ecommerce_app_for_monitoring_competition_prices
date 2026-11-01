@@ -17,7 +17,7 @@ class TestUserJourneyE2E:
         test_password = "TajneHaslo123"
         test_store_name = f"Sklep E2E {unique_id}"
         test_domain = f"sklep-e2e-{unique_id}.pl"
-        test_competitor = "https://konkurent-testowy.pl"
+        test_competitor = "https://example.com"
 
         request_id = None
         client_id = None
@@ -71,6 +71,10 @@ class TestUserJourneyE2E:
             store_prefix = approve_data.get("store_prefix")
             assert client_id is not None, "Brak client_id po zatwierdzeniu"
             assert store_prefix is not None, "Brak store_prefix po zatwierdzeniu"
+
+            with db_conn.cursor() as cur:
+                cur.execute("SELECT is_active FROM clients WHERE id = %s", (client_id,))
+                assert cur.fetchone()[0] is True, "Zatwierdzony klient powinien być aktywny i trafić do pipeline'u"
 
             with db_conn.cursor() as cur:
                 cur.execute("SELECT to_regclass(%s) AS tbl", (f"public.{store_prefix}_products",))
