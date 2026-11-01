@@ -1,4 +1,7 @@
+import glob
 import os
+import shutil
+import tempfile
 import psycopg2
 from urllib.parse import urlparse
 from fastapi import FastAPI, BackgroundTasks
@@ -30,6 +33,7 @@ DB_CONFIG = {
 # Definiujemy ścieżkę do projektu kolegi.
 # Zmienna środowiskowa SPIDERS_DIR przyda się później w Dockerze.
 SPIDERS_OUTPUT_DIR = os.environ.get("SPIDERS_DIR", "../ecommerce_price_comparer/spiders")
+MAX_STORE_NAME_LENGTH = 30
 
 
 class GenerationRequest(BaseModel):
@@ -41,10 +45,12 @@ class GenerationRequest(BaseModel):
 
 
 def pobierz_nazwe_sklepu(url):
+    if "://" not in url:
+        url = f"https://{url}"
     domain = urlparse(url).netloc
     name = domain.replace('www.', '').split('.')[0]
     name = re.sub(r'[^a-zA-Z0-9]', '_', name).lower()
-    return name
+    return name[:MAX_STORE_NAME_LENGTH]
 
 
 def przygotuj_srodowisko_klienta(nazwa_firmy: str):
@@ -62,6 +68,28 @@ def przygotuj_srodowisko_klienta(nazwa_firmy: str):
         open(init_path, 'a').close()
 
     return katalog_klienta
+
+
+def wniosek_istnieje(cur, request_id: int) -> bool:
+    cur.execute("SELECT 1 FROM onboarding_requests WHERE id = %s", (request_id,))
+    return cur.fetchone() is not None
+
+
+def usun_pliki_wniosku(request_id: int) -> int:
+    usuniete = 0
+    katalogi = set()
+
+    for wzorzec in (f"*/r{request_id}_*", f"*/__pycache__/r{request_id}_*"):
+        for sciezka in glob.glob(os.path.join(SPIDERS_OUTPUT_DIR, wzorzec)):
+            os.remove(sciezka)
+            usuniete += 1
+            katalogi.add(sciezka[:sciezka.index(os.sep, len(SPIDERS_OUTPUT_DIR) + 1)])
+
+    for katalog in katalogi:
+        if not set(os.listdir(katalog)) - {"__init__.py", "__pycache__"}:
+            shutil.rmtree(katalog)
+
+    return usuniete
 
 
 def log_scraper_step(cur, user_id: int, client_id: Optional[int], request_id: int, url: str | None, step: str, status: str, message: str = ""):
@@ -205,11 +233,39 @@ def uruchom_autonomiczny_potok(
     url_sklepu: str,
     docelowy_limit_scrapowania=None
 ):
+    with tempfile.TemporaryDirectory() as katalog_roboczy:
+        return _generuj_scraper(
+            cur,
+            request_id,
+            user_id,
+            client_id,
+            store_slug,
+            url_sklepu,
+            docelowy_limit_scrapowania,
+            katalog_roboczy
+        )
+
+
+def _generuj_scraper(
+    cur,
+    request_id: int,
+    user_id: int,
+    client_id: Optional[int],
+    store_slug: str,
+    url_sklepu: str,
+    docelowy_limit_scrapowania,
+    katalog_roboczy: str
+):
+    if not wniosek_istnieje(cur, request_id):
+        print(f"[!] Wniosek #{request_id} już nie istnieje. Pomijam {url_sklepu}.")
+        return False
+
     nazwa_sklepu = pobierz_nazwe_sklepu(url_sklepu)
 
     # To jest nazwa spidera, którą później wpiszemy do scraper_registry.
     # Musi być taka sama jak name = "..." wewnątrz wygenerowanego spidera.
-    spider_name = f"{nazwa_sklepu}_spider"
+    nazwa_spidera = f"r{request_id}_{nazwa_sklepu}"
+    spider_name = f"{nazwa_spidera}_spider"
 
     print(f"\nURUCHAMIAM AI DLA SKLEPU: {nazwa_sklepu.upper()} (Klient: {store_slug})")
 
@@ -300,11 +356,9 @@ def uruchom_autonomiczny_potok(
         else list(czyste_linki)
     )
 
-    # Tymczasowe pliki robocze AI
-    os.makedirs("data_output", exist_ok=True)
-
     probki_dla_llm = wybierz_pewne_probki(set(linki_do_pracy), ilosc=3)
-    plik_datasetu = "data_output/dataset_dla_llm.txt"
+    plik_datasetu = os.path.join(katalog_roboczy, "dataset_dla_llm.txt")
+    plik_mapy = os.path.join(katalog_roboczy, "selectors_map.json")
 
     log_scraper_step(
         cur,
@@ -317,7 +371,21 @@ def uruchom_autonomiczny_potok(
         "Generowanie zestawu danych HTML dla LLM"
     )
 
-    build_llm_dataset(probki_dla_llm)
+    build_llm_dataset(probki_dla_llm, plik_datasetu)
+
+    if not os.path.exists(plik_datasetu) or os.path.getsize(plik_datasetu) == 0:
+        log_scraper_step(
+            cur,
+            user_id,
+            client_id,
+            request_id,
+            url_sklepu,
+            "LLM Dataset",
+            "error",
+            "Nie udało się pobrać próbek HTML"
+        )
+
+        return False
 
     log_scraper_step(
         cur,
@@ -346,8 +414,22 @@ def uruchom_autonomiczny_potok(
 
     generate_scraper_from_html(
         plik_datasetu,
-        "data_output/selectors_map.json"
+        plik_mapy
     )
+
+    if not os.path.exists(plik_mapy):
+        log_scraper_step(
+            cur,
+            user_id,
+            client_id,
+            request_id,
+            url_sklepu,
+            "CSS Mapping",
+            "error",
+            "Model LLM nie zwrócił mapy selektorów"
+        )
+
+        return False
 
     log_scraper_step(
         cur,
@@ -360,9 +442,13 @@ def uruchom_autonomiczny_potok(
         "Mapa wygenerowana"
     )
 
+    if not wniosek_istnieje(cur, request_id):
+        print(f"[!] Wniosek #{request_id} już nie istnieje. Nie zapisuję spidera.")
+        return False
+
     # KROK 6: Zapis spidera do folderu klienta po store_slug
     katalog_klienta = przygotuj_srodowisko_klienta(store_slug)
-    plik_spidera = os.path.join(katalog_klienta, f"{nazwa_sklepu}_spider.py")
+    plik_spidera = os.path.join(katalog_klienta, f"{spider_name}.py")
 
     log_scraper_step(
         cur,
@@ -376,9 +462,9 @@ def uruchom_autonomiczny_potok(
     )
 
     generate_spider_file(
-        "data_output/selectors_map.json",
+        plik_mapy,
         plik_spidera,
-        nazwa_sklepu,
+        nazwa_spidera,
         links=czyste_linki
     )
 
@@ -533,6 +619,11 @@ def trigger_generation(payload: GenerationRequest, background_tasks: BackgroundT
         "client_id": payload.client_id,
         "store_slug": payload.store_slug
     }
+
+
+@app.delete("/api/requests/{request_id}/spiders")
+def usun_scrapery_wniosku(request_id: int):
+    return {"ok": True, "removed": usun_pliki_wniosku(request_id)}
 
 
 if __name__ == "__main__":

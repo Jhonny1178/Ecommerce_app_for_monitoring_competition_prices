@@ -78,7 +78,7 @@ def get_html_string(soup):
     return html_str.strip()
 
 
-def build_llm_dataset(urls_to_process):
+def build_llm_dataset(urls_to_process, output_filename):
     final_output = []
     total_chars = 0
     processed_count = 0
@@ -102,23 +102,23 @@ def build_llm_dataset(urls_to_process):
             html_str = get_html_string(clean_soup)
 
             if link_number == 1:
-                if len(html_str) > 25000:
-                    print(" -> [Krok 2.1.1] HTML > 25000 znaków. Wdrażam czyszczenie ryzykowne.")
+                if len(html_str) > 15000:
+                    print(" -> [Krok 2.1.1] HTML > 15000 znaków. Wdrażam czyszczenie ryzykowne.")
                     clean_soup = risky_clean(clean_soup)
                     html_str = get_html_string(clean_soup)
 
-                    if len(html_str) > 25000:
-                        ucieto = len(html_str) - 24800
-                        html_str = html_str[:24800]
-                        print(f" -> [Krok 2.1.2] Nadal > 25000. Ucinam na sztywno {ucieto} znaków od dołu.")
+                    if len(html_str) > 15000:
+                        ucieto = len(html_str) - 14800
+                        html_str = html_str[:14800]
+                        print(f" -> [Krok 2.1.2] Nadal > 15000. Ucinam na sztywno {ucieto} znaków od dołu.")
 
                 block = f"\n--- URL: {url} ---\n{html_str}\n"
                 final_output.append(block)
                 total_chars += len(block)
                 processed_count += 1
 
-                if total_chars > 12000:
-                    print(f" -> [Krok 2.1.3 / 2.2] Link 1 ma {total_chars} znaków (> 12000). Zamykam zbiór.")
+                if total_chars > 9000:
+                    print(f" -> [Krok 2.1.3 / 2.2] Link 1 ma {total_chars} znaków (> 9000). Zamykam zbiór.")
                     break
                 else:
                     print(f" -> [Krok 2.1.4 / 2.3] Link 1 ma {total_chars} znaków. Przechodzę do Linku 2.")
@@ -127,23 +127,23 @@ def build_llm_dataset(urls_to_process):
             elif link_number == 2:
                 block = f"\n--- URL: {url} ---\n{html_str}\n"
 
-                if total_chars + len(block) > 25000:
-                    print(" -> [Krok 3.1.1] Suma > 25000. Wdrażam czyszczenie ryzykowne dla Linku 2.")
+                if total_chars + len(block) > 15000:
+                    print(" -> [Krok 3.1.1] Suma > 15000. Wdrażam czyszczenie ryzykowne dla Linku 2.")
                     clean_soup = risky_clean(clean_soup)
                     html_str = get_html_string(clean_soup)
                     block = f"\n--- URL: {url} ---\n{html_str}\n"
 
-                    if total_chars + len(block) > 25000:
+                    if total_chars + len(block) > 15000:
                         print(
-                            " -> [Krok 3.1.2] Suma po ryzykownym nadal > 25000. Odrzucam Link 2. Zapisuję tylko Link 1.")
+                            " -> [Krok 3.1.2] Suma po ryzykownym nadal > 15000. Odrzucam Link 2. Zapisuję tylko Link 1.")
                         break
 
                 final_output.append(block)
                 total_chars += len(block)
                 processed_count += 1
 
-                if total_chars > 16000:
-                    print(f" -> [Krok 3.1.3] Suma wynosi {total_chars} znaków (> 16000). Zamykam zbiór.")
+                if total_chars > 12000:
+                    print(f" -> [Krok 3.1.3] Suma wynosi {total_chars} znaków (> 12000). Zamykam zbiór.")
                     break
                 else:
                     print(f" -> [Krok 3.1.4] Suma wynosi {total_chars} znaków. Przechodzę do Linku 3.")
@@ -152,8 +152,8 @@ def build_llm_dataset(urls_to_process):
             elif link_number == 3:
                 block = f"\n--- URL: {url} ---\n{html_str}\n"
 
-                if total_chars + len(block) > 25000:
-                    print(" -> [Krok 4] Suma dla 3 linków > 25000. Odrzucam Link 3. Zapisuję 2 linki.")
+                if total_chars + len(block) > 15000:
+                    print(" -> [Krok 4] Suma dla 3 linków > 15000. Odrzucam Link 3. Zapisuję 2 linki.")
                     break
 
                 final_output.append(block)
@@ -165,7 +165,6 @@ def build_llm_dataset(urls_to_process):
         except Exception as e:
             print(f" -> Błąd podczas pobierania {url}: {e}")
 
-    output_filename = "data_output/dataset_dla_llm.txt"
     final_text = "".join(final_output)
 
     with open(output_filename, "w", encoding="utf-8") as f:

@@ -12,8 +12,8 @@ def generate_spider_file(json_map_path="selectors_map.json", output_file="autono
 
     formatted_map = "{\n"
     for k, v in css_map.items():
-        val = f'"{v}"' if v is not None else 'None'
-        formatted_map += f'        "{k}": {val},\n'
+        val = repr(str(v)) if v is not None else 'None'
+        formatted_map += f'        {repr(str(k))}: {val},\n'
     formatted_map += "    }"
 
     safe_name = re.sub(r'[^a-zA-Z0-9]', '_', store_name).lower()

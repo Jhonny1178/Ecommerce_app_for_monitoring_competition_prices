@@ -115,6 +115,15 @@ class GroqManager:
                 return response
             except Exception as e:
                 error_str = str(e).lower()
+                if 'per minute' in error_str and 'request too large' not in error_str:
+                    response = getattr(e, 'response', None)
+                    headers = getattr(response, 'headers', None) or {}
+                    wait_seconds = min(float(headers.get('retry-after', 60)) + 1, 65)
+                    print(f"[GROQ MANAGER] Limit minutowy klucza {key_name}. Czekam {wait_seconds} s.", flush=True)
+                    time.sleep(wait_seconds)
+                    last_exception = e
+                    continue
+
                 if '429' in error_str or 'rate limit' in error_str or 'quota' in error_str or 'insufficient_quota' in error_str:
                     self.mark_exhausted(key_name)
                     last_exception = e

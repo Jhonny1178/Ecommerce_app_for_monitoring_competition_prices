@@ -65,7 +65,7 @@ def generate_scraper_from_html(html_file_path: str, output_json_path: str):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 response_format={"type": "json_object"},
                 temperature=0.0,
                 max_tokens=2000
@@ -92,8 +92,10 @@ def generate_scraper_from_html(html_file_path: str, output_json_path: str):
         print(f"\n[BŁĄD KRYTYCZNY] Model LLM nie zwrócił poprawnego formatu JSON!")
         print(f"Szczegóły błędu: {e}")
         print(f"Surowa odpowiedź modelu przed próbą zapisu:\n{response_text}")
+        raise
     except Exception as e:
         print(f"\nBłąd łączności lub API: {e}")
+        raise
 
 
 if __name__ == "__main__":

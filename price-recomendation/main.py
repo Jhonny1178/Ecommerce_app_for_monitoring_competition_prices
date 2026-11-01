@@ -61,7 +61,7 @@ def skonsultuj_z_llm(nazwa, liczby, nasza_cena, cena_z_algorytmu, kod_algorytmu)
                 {"role": "system", "content": "Jesteś ekspertem ds. strategii cenowych. Odpowiadasz tylko w JSON."},
                 {"role": "user", "content": prompt}
             ],
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_format={"type": "json_object"},
             temperature=0.2
         )
