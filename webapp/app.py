@@ -18,10 +18,11 @@ load_dotenv()
 
 app = Flask(__name__)
 
-app.secret_key = os.environ.get(
-    "SECRET_KEY",
-    "super-tajny-klucz"
-)
+app.secret_key = os.environ.get("SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError(
+        "SECRET_KEY is not set in environment variables"
+    )
 
 app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),

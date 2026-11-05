@@ -6,7 +6,7 @@ import traceback
 import smtplib
 from email.message import EmailMessage
 import string
-import random
+import secrets
 import re
 import datetime
 from zoneinfo import ZoneInfo
@@ -350,7 +350,7 @@ def api_forgot_password():
         user = cur.fetchone()
 
         if user:
-            code = ''.join(random.choices(string.digits, k=6))
+            code = ''.join(secrets.choice(string.digits) for _ in range(6))
             hashed_code = hash_password(code)
             expires_at = datetime.datetime.now() + datetime.timedelta(minutes=15)
 

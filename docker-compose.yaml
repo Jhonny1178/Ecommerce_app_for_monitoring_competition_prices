@@ -429,6 +429,7 @@ services:
       - APP_DB_NAME=${APP_DB_NAME}
       - APP_DB_USER=${APP_DB_USER}
       - APP_DB_PASSWORD=${APP_DB_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY}
       - ONBOARDING_UPLOAD_DIR=/shared/onboarding
       - EROCH_GMAIL=${EROCH_GMAIL}
       - GMAIL_USER=${GMAIL_USER}

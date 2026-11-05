@@ -3,8 +3,10 @@ import math
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 import requests
+import ipaddress
+import socket
 
 from utils import get_db, login_required
 
@@ -160,6 +162,24 @@ def _normalize_image_url(image_url):
 
     return image_url
 
+def _is_safe_proxy_target(url):
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+
+    if not hostname:
+        return False
+
+    try:
+        addrs = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+
+    for family, _, _, _, sockaddr in addrs:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+
+    return True
 
 def _proxied_image_url(image_url):
     normalized = _normalize_image_url(image_url)
@@ -799,6 +819,12 @@ def api_image_proxy():
 
     image_url = _normalize_image_url(unquote(raw_url))
 
+    if not _is_safe_proxy_target(image_url):
+        return jsonify({
+            "ok": False,
+            "error": "Niedozwolony host docelowy"
+        }), 400
+    
     if not image_url:
         return jsonify({
             "ok": False,
