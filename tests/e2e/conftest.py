@@ -7,14 +7,17 @@ import psycopg2.extras
 WEBAPP_URL = os.getenv("E2E_WEBAPP_URL", "http://localhost:6767")
 FRONTEND_URL = os.getenv("E2E_FRONTEND_URL", "http://localhost:80")
 
-ADMIN_CREDENTIALS = {"username": "admin", "password": "admin123"}
+ADMIN_CREDENTIALS = {
+    "username": os.getenv("E2E_ADMIN_USERNAME", "admin"),
+    "password": os.getenv("E2E_ADMIN_PASSWORD", ""),
+}
 
 DB_CONFIG = {
     "host": os.getenv("E2E_DB_HOST", "localhost"),
     "port": int(os.getenv("E2E_DB_PORT", 5434)),
     "dbname": os.getenv("E2E_DB_NAME", "ecommerce_data"),
-    "user": os.getenv("E2E_DB_USER", "postgres"),
-    "password": os.getenv("E2E_DB_PASSWORD", "eroch"),
+    "user": os.getenv("E2E_DB_USER") or os.getenv("APP_DB_USER", "postgres"),
+    "password": os.getenv("E2E_DB_PASSWORD") or os.getenv("APP_DB_PASSWORD", ""),
 }
 
 

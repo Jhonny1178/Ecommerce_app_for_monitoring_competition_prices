@@ -141,6 +141,30 @@ class TestUserJourneyE2E:
             assert stats_data.get("ok") is True
             assert "summary" in stats_data
 
+            resp_blocked_url = pre_session.post(
+                f"{WEBAPP_URL}/api/upload_onboarding_file",
+                data={"source_type": "url", "file_format": "csv", "source_url": "http://127.0.0.1:8080/x.csv"},
+                timeout=10,
+            )
+            assert resp_blocked_url.status_code == 400
+
+            resp_cancel = client_session.post(f"{WEBAPP_URL}/api/subscription/cancel", timeout=10)
+            assert resp_cancel.status_code == 200
+            resp_cancelled = client_session.get(f"{WEBAPP_URL}/api/products", timeout=10)
+            assert resp_cancelled.status_code == 403
+            resp_buy = client_session.post(f"{WEBAPP_URL}/api/subscription/buy", json={"package": "Podstawowy"}, timeout=10)
+            assert resp_buy.status_code == 200
+            assert client_session.get(f"{WEBAPP_URL}/api/products", timeout=10).status_code == 200
+
+            resp_change = client_session.post(
+                f"{WEBAPP_URL}/api/change_password",
+                json={"current_password": test_password, "new_password": "NoweTajneHaslo456"},
+                timeout=10,
+            )
+            assert resp_change.status_code == 200
+            assert client_session.get(f"{WEBAPP_URL}/api/me", timeout=10).status_code == 200
+            assert pre_session.get(f"{WEBAPP_URL}/api/me", timeout=10).status_code == 401
+
             resp_logout = client_session.post(f"{WEBAPP_URL}/api/logout", timeout=10)
             assert resp_logout.status_code == 200
             resp_after_logout = client_session.get(f"{WEBAPP_URL}/api/me", timeout=10)

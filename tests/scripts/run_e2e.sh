@@ -16,12 +16,25 @@ else
     exit 1
 fi
 
+if [ -f .env ]; then
+    export APP_DB_USER="${APP_DB_USER:-$(grep '^APP_DB_USER=' .env | cut -d= -f2-)}"
+    export APP_DB_PASSWORD="${APP_DB_PASSWORD:-$(grep '^APP_DB_PASSWORD=' .env | cut -d= -f2-)}"
+    export E2E_ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-$(grep "^ADMIN_PASSWORD=" .env | cut -d= -f2-)}"
+fi
+if [ -z "$E2E_ADMIN_PASSWORD" ]; then
+    echo "UWAGA: brak E2E_ADMIN_PASSWORD (w .env lub w zmiennej) — testy logowania admina nie przejdą."
+fi
+
 echo "[1/3] Sprawdzam kontenery..."
 docker compose ps --format "table {{.Name}}\t{{.Status}}" | head -20
 
 echo ""
 echo "[2/3] Instaluję/sprawdzam zależności testowe..."
-$PYTHON_CMD -m pip install -q pytest requests psycopg2-binary 2>/dev/null || true
+if $PYTHON_CMD -c "import pytest, requests, psycopg2" 2>/dev/null; then
+    echo "Zależności już zainstalowane."
+else
+    $PYTHON_CMD -m pip install --timeout 30 pytest requests psycopg2-binary || true
+fi
 
 echo ""
 echo "[3/3] Uruchamiam testy E2E ($PYTHON_CMD)..."
