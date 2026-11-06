@@ -3,14 +3,22 @@ import math
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 import requests
 import ipaddress
 import socket
 
 from utils import get_db, login_required
+from extensions import limiter, user_rate_key
 
 products_bp = Blueprint("products", __name__)
+
+IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024
+IMAGE_PROXY_MAX_REDIRECTS = 3
+IMAGE_PROXY_ALLOWED_TYPES = {
+    "image/jpeg", "image/jpg", "image/png", "image/gif",
+    "image/webp", "image/avif", "image/bmp", "image/x-icon",
+}
 
 
 def _get_store_prefix():
@@ -163,20 +171,23 @@ def _normalize_image_url(image_url):
     return image_url
 
 def _is_safe_proxy_target(url):
-    parsed = urlparse(url)
-    hostname = parsed.hostname
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError:
+        return False
 
-    if not hostname:
+    if not hostname or any(ord(char) <= 32 or ord(char) == 127 for char in hostname):
         return False
 
     try:
         addrs = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
+    except (socket.gaierror, ValueError):
         return False
 
     for family, _, _, _, sockaddr in addrs:
         ip = ipaddress.ip_address(sockaddr[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             return False
 
     return True
@@ -808,6 +819,7 @@ def _get_match_analysis_summary(cur, matches_table: str) -> dict:
 
 @products_bp.route("/api/image-proxy")
 @login_required
+@limiter.limit("300 per minute", key_func=user_rate_key)
 def api_image_proxy():
     raw_url = request.args.get("url", "").strip()
 
@@ -819,54 +831,81 @@ def api_image_proxy():
 
     image_url = _normalize_image_url(unquote(raw_url))
 
-    if not _is_safe_proxy_target(image_url):
-        return jsonify({
-            "ok": False,
-            "error": "Niedozwolony host docelowy"
-        }), 400
-    
     if not image_url:
         return jsonify({
             "ok": False,
             "error": "Nieprawidłowy URL obrazka"
         }), 400
 
+    if not _is_safe_proxy_target(image_url):
+        return jsonify({
+            "ok": False,
+            "error": "Niedozwolony host docelowy"
+        }), 400
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/apng,image/*;q=0.8",
+    }
+
     try:
-        response = requests.get(
-            image_url,
-            timeout=12,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0 Safari/537.36"
-                ),
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            },
-        )
+        for _ in range(IMAGE_PROXY_MAX_REDIRECTS + 1):
+            response = requests.get(
+                image_url,
+                timeout=12,
+                headers=headers,
+                stream=True,
+                allow_redirects=False,
+            )
+
+            if response.is_redirect:
+                image_url = urljoin(image_url, response.headers.get("Location", ""))
+                response.close()
+                if not _is_safe_proxy_target(image_url):
+                    return jsonify({
+                        "ok": False,
+                        "error": "Niedozwolony host docelowy"
+                    }), 400
+                continue
+            break
+        else:
+            return jsonify({"ok": False, "error": "Zbyt wiele przekierowań"}), 400
 
         if response.status_code >= 400:
+            response.close()
             return jsonify({
                 "ok": False,
                 "error": f"Nie udało się pobrać obrazka. Status={response.status_code}"
-            }), response.status_code
+            }), 502
 
-        content_type = response.headers.get("Content-Type", "image/jpeg")
+        content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type not in IMAGE_PROXY_ALLOWED_TYPES:
+            response.close()
+            return jsonify({"ok": False, "error": "Adres nie wskazuje na obrazek"}), 400
+
+        content = b""
+        for chunk in response.iter_content(64 * 1024):
+            content += chunk
+            if len(content) > IMAGE_PROXY_MAX_BYTES:
+                response.close()
+                return jsonify({"ok": False, "error": "Obrazek jest za duży"}), 413
 
         return Response(
-            response.content,
+            content,
             mimetype=content_type,
             headers={
-                "Cache-Control": "public, max-age=86400",
-                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "private, max-age=86400",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox",
             },
         )
 
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
+    except (requests.RequestException, ValueError):
+        return jsonify({"ok": False, "error": "Nie udało się pobrać obrazka"}), 502
 
 
 @products_bp.route("/api/products")
@@ -1278,6 +1317,7 @@ def api_product_price_history(product_id: int):
 
 @products_bp.route("/api/products/<int:product_id>/recommend", methods=["POST"])
 @login_required
+@limiter.limit("30 per hour", key_func=user_rate_key)
 def api_product_recommend(product_id):
     prefix = _get_store_prefix()
     if not prefix:

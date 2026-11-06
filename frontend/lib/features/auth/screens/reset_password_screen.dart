@@ -34,8 +34,8 @@ class _ResetPasswordScreenState extends State<ResetPasswordScreen> {
       hasError = true;
     }
     
-    if (newPassword.length < 6 || !newPassword.contains(RegExp(r'\d'))) {
-      _newPasswordError = 'Hasło musi mieć minimum 6 znaków i zawierać przynajmniej jedną cyfrę';
+    if (newPassword.length < 12 || !newPassword.contains(RegExp(r'\d'))) {
+      _newPasswordError = 'Hasło musi mieć minimum 12 znaków i zawierać przynajmniej jedną cyfrę';
       hasError = true;
     }
     

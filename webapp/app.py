@@ -2,14 +2,19 @@ from flask import Flask, request, session, jsonify
 import psycopg2.extras
 from dotenv import load_dotenv
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
+from urllib.parse import urlparse
 import os
+import json
 import hashlib
 import unicodedata
 import re
 import csv
 import io
 import xml.etree.ElementTree as ET
-from utils import get_db, hash_password, generate_store_prefix, login_required, admin_required
+from utils import get_db, hash_password, generate_store_prefix, login_required, admin_required, refresh_session_from_db
+from extensions import limiter
+from manage_users import sync_shared_passwords_from_env
 from routes.products import products_bp
 from routes.auth import auth_bp
 from datetime import timedelta
@@ -17,11 +22,18 @@ from datetime import timedelta
 load_dotenv()
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+limiter.init_app(app)
 
 app.secret_key = os.environ.get("SECRET_KEY")
 if not app.secret_key:
     raise RuntimeError(
         "SECRET_KEY is not set in environment variables"
+    )
+if len(app.secret_key) < 32:
+    raise RuntimeError(
+        "SECRET_KEY must be at least 32 characters long"
     )
 
 app.config.update(
@@ -29,15 +41,65 @@ app.config.update(
     SESSION_REFRESH_EACH_REQUEST=True,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=False,
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
     SESSION_COOKIE_NAME="eroch_session",
     SESSION_COOKIE_PATH="/",
+    MAX_CONTENT_LENGTH=int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024,
 )
 
-CORS(
-    app,
-    supports_credentials=True,
-)
+cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
+if cors_origins:
+    CORS(app, origins=cors_origins, supports_credentials=True)
+
+
+@app.before_request
+def reject_cross_origin_writes():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+
+    origin = request.headers.get("Origin")
+    if not origin or origin in cors_origins:
+        return None
+
+    if urlparse(origin).hostname != urlparse(f"//{request.host}").hostname:
+        return jsonify({"ok": False, "error": "Niedozwolone źródło żądania"}), 403
+
+    return None
+
+
+app.before_request(refresh_session_from_db)
+
+
+@app.after_request
+def hide_internal_errors(response):
+    """
+    Treść wyjątków (str(e)) zdradza strukturę bazy i zapytania SQL.
+    Zwykły użytkownik dostaje ogólny komunikat, szczegóły idą do logów kontenera.
+    Admin widzi pełny błąd (ułatwia diagnozę w panelu).
+    """
+    if response.status_code < 500 or not response.is_json or session.get("is_admin"):
+        return response
+
+    data = response.get_json(silent=True)
+    if isinstance(data, dict) and "error" in data:
+        app.logger.error("%s %s -> %s: %s", request.method, request.path, response.status_code, data["error"])
+        data["error"] = "Wystąpił błąd serwera. Spróbuj ponownie później."
+        response.set_data(json.dumps(data))
+
+    return response
+
+
+@app.errorhandler(413)
+def request_too_large(_e):
+    return jsonify({"ok": False, "error": "Plik jest za duży"}), 413
+
+
+@app.errorhandler(429)
+def too_many_requests(_e):
+    return jsonify({
+        "ok": False,
+        "error": "Zbyt wiele prób. Odczekaj chwilę i spróbuj ponownie."
+    }), 429
 
 
 
@@ -644,6 +706,8 @@ def admin_upload_confirm():
         cur  = conn.cursor()
 
         for i, row in enumerate(rows):
+            if not isinstance(row, dict): continue
+            row = _coerce_row(row)
             if not row: continue
             cols = list(row.keys())
             vals = list(row.values())
@@ -688,5 +752,8 @@ def admin_upload_confirm():
 
 app.register_blueprint(products_bp)
 app.register_blueprint(auth_bp)
+
+sync_shared_passwords_from_env()
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=6767, debug=False)

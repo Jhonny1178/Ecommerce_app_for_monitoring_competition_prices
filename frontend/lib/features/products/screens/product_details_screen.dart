@@ -49,6 +49,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     final Uri url = Uri.parse(urlString);
 
+    if (!url.isScheme('http') && !url.isScheme('https')) return;
+
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
     } else if (mounted) {

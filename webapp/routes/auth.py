@@ -16,13 +16,17 @@ from psycopg2 import errors
 import requests
 from werkzeug.utils import secure_filename
 
-from utils import get_db, get_db_transaction, hash_password, admin_required, is_existing_website
+from utils import get_db, get_db_transaction, hash_password, verify_password, hash_token, admin_required, is_allowed_external_url, is_existing_website, session_fingerprint
 from services.provisioning import provision_client_from_request
+from extensions import limiter, user_rate_key
 
 
 auth_bp = Blueprint("auth", __name__)
 
 UPLOAD_ROOT = os.environ.get("ONBOARDING_UPLOAD_DIR", "/tmp/onboarding")
+
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_hex(16))
+
 
 MAX_COMPETITOR_URLS = 5
 EMAIL_PATTERN = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
@@ -33,9 +37,18 @@ def _forbidden_url_response(competitor_urls, *other_urls):
         return jsonify({"ok": False, "error": f"Można podać maksymalnie {MAX_COMPETITOR_URLS} adresów konkurencji"}), 400
 
     for url in (*other_urls, *competitor_urls):
-        if url and not is_existing_website(url):
+        if not url:
+            continue
+        if not is_allowed_external_url(url):
+            return jsonify({"ok": False, "error": f"Niedozwolony adres: {url}"}), 400
+        if not is_existing_website(url):
             return jsonify({"ok": False, "error": f"Nie znaleziono strony pod adresem: {url}. Sprawdź, czy link jest poprawny."}), 400
     return None
+
+
+def _email_rate_key():
+    data = request.get_json(silent=True) or {}
+    return "email:" + str(data.get("email", "")).strip().lower()
 
 
 # ============================================================
@@ -299,6 +312,7 @@ def _cron_as_polish_time(cron_expression):
 # ============================================================
 
 @auth_bp.route("/api/change_password", methods=["POST"])
+@limiter.limit("10 per hour")
 def api_change_password():
     user_id = session.get("user_id")
     if not user_id:
@@ -311,8 +325,8 @@ def api_change_password():
     if not current_password:
         return jsonify({"ok": False, "error": "Podaj aktualne hasło"}), 400
 
-    if len(new_password) < 6 or not any(char.isdigit() for char in new_password):
-        return jsonify({"ok": False, "error": "Hasło musi mieć minimum 6 znaków i zawierać przynajmniej jedną cyfrę"}), 400
+    if len(new_password) < 12 or not any(char.isdigit() for char in new_password):
+        return jsonify({"ok": False, "error": "Hasło musi mieć minimum 12 znaków i zawierać przynajmniej jedną cyfrę"}), 400
 
     try:
         conn = get_db()
@@ -321,7 +335,7 @@ def api_change_password():
         cur.execute("SELECT password_hash FROM users WHERE id = %s", (user_id,))
         user = cur.fetchone()
         
-        if not user or user["password_hash"] != hash_password(current_password):
+        if not user or not verify_password(user["password_hash"], current_password)[0]:
             cur.close()
             conn.close()
             return jsonify({"ok": False, "error": "Aktualne hasło jest niepoprawne"}), 400
@@ -329,6 +343,7 @@ def api_change_password():
         hashed = hash_password(new_password)
         cur.execute("UPDATE users SET password_hash = %s, updated_at = NOW() WHERE id = %s", (hashed, user_id))
         conn.commit()
+        session["password_fingerprint"] = session_fingerprint(hashed)
         cur.close()
         conn.close()
         return jsonify({"ok": True, "message": "Hasło zostało zmienione"})
@@ -336,6 +351,8 @@ def api_change_password():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @auth_bp.route("/api/forgot_password", methods=["POST"])
+@limiter.limit("5 per hour")
+@limiter.limit("3 per hour", key_func=_email_rate_key)
 def api_forgot_password():
     data = request.get_json() or {}
     email = data.get("email", "").strip()
@@ -351,9 +368,10 @@ def api_forgot_password():
 
         if user:
             code = ''.join(secrets.choice(string.digits) for _ in range(6))
-            hashed_code = hash_password(code)
+            hashed_code = hash_token(code)
             expires_at = datetime.datetime.now() + datetime.timedelta(minutes=15)
 
+            cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user["id"],))
             cur.execute("""
                 INSERT INTO password_resets (user_id, reset_token_hash, expires_at)
                 VALUES (%s, %s, %s)
@@ -372,6 +390,8 @@ def api_forgot_password():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 @auth_bp.route("/api/reset_password", methods=["POST"])
+@limiter.limit("10 per 15 minutes")
+@limiter.limit("5 per 15 minutes", key_func=_email_rate_key)
 def api_reset_password():
     data = request.get_json() or {}
     email = data.get("email", "").strip()
@@ -381,8 +401,8 @@ def api_reset_password():
     if not email or not code or not new_password:
         return jsonify({"ok": False, "error": "Wypełnij wszystkie pola"}), 400
 
-    if len(new_password) < 6 or not any(char.isdigit() for char in new_password):
-        return jsonify({"ok": False, "error": "Hasło musi mieć minimum 6 znaków i zawierać przynajmniej jedną cyfrę"}), 400
+    if len(new_password) < 12 or not any(char.isdigit() for char in new_password):
+        return jsonify({"ok": False, "error": "Hasło musi mieć minimum 12 znaków i zawierać przynajmniej jedną cyfrę"}), 400
 
     try:
         conn = get_db()
@@ -397,7 +417,7 @@ def api_reset_password():
             return jsonify({"ok": False, "error": "Nieprawidłowy kod lub e-mail"}), 400
 
         user_id = user["id"]
-        hashed_code = hash_password(code)
+        hashed_code = hash_token(code)
 
         cur.execute("""
             SELECT id FROM password_resets
@@ -409,11 +429,11 @@ def api_reset_password():
         if not reset_record:
             cur.close()
             conn.close()
-            return jsonify({"ok": False, "error": "Nieprawidłowy lub wygasły kod"}), 400
+            return jsonify({"ok": False, "error": "Nieprawidłowy kod lub e-mail"}), 400
 
         hashed_password = hash_password(new_password)
         cur.execute("UPDATE users SET password_hash = %s, updated_at = NOW() WHERE id = %s", (hashed_password, user_id))
-        cur.execute("DELETE FROM password_resets WHERE id = %s", (reset_record["id"],))
+        cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user_id,))
         
         conn.commit()
         cur.close()
@@ -430,6 +450,7 @@ def api_logout():
 
 
 @auth_bp.route("/api/login", methods=["POST"])
+@limiter.limit("10 per minute; 30 per hour")
 def api_login():
     data = request.get_json() or {}
 
@@ -438,8 +459,6 @@ def api_login():
 
     if not username or not password:
         return jsonify({"ok": False, "error": "Podaj login i hasło."}), 400
-
-    hashed = hash_password(password)
 
     try:
         conn = get_db()
@@ -462,15 +481,27 @@ def api_login():
             FROM users u
             LEFT JOIN clients c ON c.id = u.client_id
             WHERE u.username = %s
-              AND u.password_hash = %s
-        """, (username, hashed))
+        """, (username,))
 
         user = cur.fetchone()
+
+        if user:
+            password_ok, needs_rehash = verify_password(user["password_hash"], password)
+        else:
+            verify_password(_DUMMY_PASSWORD_HASH, password)
+            password_ok, needs_rehash = False, False
+
+        if password_ok and needs_rehash:
+            user["password_hash"] = hash_password(password)
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE id = %s",
+                (user["password_hash"], user["id"]),
+            )
 
         cur.close()
         conn.close()
 
-        if not user:
+        if not password_ok:
             return jsonify({
                 "ok": False,
                 "error": "Nieprawidłowy login lub hasło."
@@ -485,6 +516,7 @@ def api_login():
         session["client_id"] = user.get("client_id")
         session["client_slug"] = user.get("client_slug")
         session["store_prefix"] = user.get("store_prefix")
+        session["password_fingerprint"] = session_fingerprint(user["password_hash"])
 
         return jsonify({
             "ok": True,
@@ -511,6 +543,7 @@ def api_login():
 
 
 @auth_bp.route("/api/register", methods=["POST"])
+@limiter.limit("5 per hour")
 def api_register():
     data = request.get_json() or {}
 
@@ -545,10 +578,10 @@ def api_register():
             "error": "Podaj poprawny adres e-mail"
         }), 400
 
-    if len(password) < 6 or not any(char.isdigit() for char in password):
+    if len(password) < 12 or not any(char.isdigit() for char in password):
         return jsonify({
             "ok": False,
-            "error": "Hasło musi mieć minimum 6 znaków i zawierać przynajmniej jedną cyfrę"
+            "error": "Hasło musi mieć minimum 12 znaków i zawierać przynajmniej jedną cyfrę"
         }), 400
 
     if not competitor_urls:
@@ -857,14 +890,10 @@ def _save_onboarding_submission():
 
         filename = secure_filename(uploaded_file.filename)
 
-        os.makedirs(UPLOAD_ROOT, exist_ok=True)
-
         source_path = os.path.join(
             UPLOAD_ROOT,
             f"user_{user_id}_{filename}"
         )
-
-        uploaded_file.save(source_path)
 
         original_name = uploaded_file.filename
         mime_type = uploaded_file.mimetype
@@ -907,6 +936,10 @@ def _save_onboarding_submission():
                 "ok": False,
                 "error": "No approved onboarding request found. Admin approval is required first."
             }), 403
+
+        if source_type == "local":
+            os.makedirs(UPLOAD_ROOT, exist_ok=True)
+            uploaded_file.save(source_path)
 
         request_id = onboarding_request["id"]
         client_id = onboarding_request["client_id"]
@@ -1037,6 +1070,7 @@ def _save_onboarding_submission():
 
 
 @auth_bp.route("/api/onboarding/submit", methods=["POST"])
+@limiter.limit("10 per hour", key_func=user_rate_key)
 def api_onboarding_submit():
     return _save_onboarding_submission()
 
@@ -1055,9 +1089,13 @@ def api_subscription_buy():
     try:
         cur = conn.cursor()
         
-        cur.execute("SELECT client_id FROM users WHERE id = %s", (user_id,))
+        cur.execute("SELECT client_id, status FROM users WHERE id = %s", (user_id,))
         row = cur.fetchone()
         client_id = row[0] if row else None
+
+        if not row or row[1] not in ("awaiting_payment", "active"):
+            conn.rollback()
+            return jsonify({"ok": False, "error": "Nie można wybrać planu przy obecnym statusie konta"}), 409
         
         new_status = 'active' if client_id else 'pending_admin'
         
@@ -1093,6 +1131,7 @@ def api_subscription_buy():
 
 
 @auth_bp.route("/api/upload_onboarding_file", methods=["POST"])
+@limiter.limit("10 per hour", key_func=user_rate_key)
 def upload_onboarding_file():
     return _save_onboarding_submission()
 
@@ -1101,7 +1140,11 @@ def upload_onboarding_file():
 # Contact / bug report
 # ============================================================
 
+MAX_MESSAGE_LENGTH = 5000
+
+
 @auth_bp.route("/api/send_message", methods=["POST"])
+@limiter.limit("5 per hour")
 def api_send_message():
     data = request.get_json() or {}
     message = data.get("message", "").strip()
@@ -1110,6 +1153,12 @@ def api_send_message():
         return jsonify({
             "ok": False,
             "error": "Pusta wiadomość"
+        }), 400
+
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return jsonify({
+            "ok": False,
+            "error": f"Wiadomość może mieć maksymalnie {MAX_MESSAGE_LENGTH} znaków"
         }), 400
 
     username = session.get("username", "Nieznany")
@@ -1142,6 +1191,7 @@ def api_send_message():
 
 
 @auth_bp.route("/api/report_bug", methods=["POST"])
+@limiter.limit("10 per hour")
 def api_report_bug():
     data = request.get_json() or {}
 
@@ -1151,6 +1201,12 @@ def api_report_bug():
         return jsonify({
             "ok": False,
             "error": "Brak treści"
+        }), 400
+
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return jsonify({
+            "ok": False,
+            "error": f"Zgłoszenie może mieć maksymalnie {MAX_MESSAGE_LENGTH} znaków"
         }), 400
 
     user_id = session.get("user_id")
@@ -2128,6 +2184,12 @@ def api_subscription_cancel():
     conn = get_db_transaction()
     try:
         cur = conn.cursor()
+        cur.execute("SELECT status FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row or row[0] != "active":
+            conn.rollback()
+            return jsonify({"ok": False, "error": "Nie można anulować subskrypcji przy obecnym statusie konta"}), 409
+
         cur.execute("""
             UPDATE users 
             SET status = 'awaiting_payment'

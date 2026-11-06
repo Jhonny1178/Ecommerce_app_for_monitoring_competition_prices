@@ -67,8 +67,8 @@ class _RegisterScreenOneState extends State<RegisterScreenOne> {
                   _emailError = Validators.invalidEmail;
                   hasError = true;
                 }
-                if (password.length < 6 || !password.contains(RegExp(r'\d'))) {
-                   _passwordError = 'Hasło musi mieć min. 6 znaków i 1 cyfrę';
+                if (password.length < 12 || !password.contains(RegExp(r'\d'))) {
+                   _passwordError = 'Hasło musi mieć min. 12 znaków i 1 cyfrę';
                    hasError = true;
                 }
                 if (password != _repeatPasswordController.text) {

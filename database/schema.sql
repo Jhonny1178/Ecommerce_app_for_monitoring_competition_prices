@@ -401,7 +401,7 @@ INSERT INTO users (
 )
 VALUES (
     'admin',
-    encode(digest('admin123', 'sha256'), 'hex'),
+    '!',
     TRUE,
     NULL,
     'active',
@@ -410,7 +410,6 @@ VALUES (
     'admin@example.com'
 )
 ON CONFLICT (username) DO UPDATE SET
-    password_hash = EXCLUDED.password_hash,
     is_admin = EXCLUDED.is_admin,
     client_id = NULL,
     status = EXCLUDED.status,
@@ -486,7 +485,7 @@ INSERT INTO users (
 )
 VALUES (
     'admin',
-    encode(digest('admin123', 'sha256'), 'hex'),
+    '!',
     TRUE,
     NULL,
     'active',
@@ -510,7 +509,7 @@ INSERT INTO users (
 )
 VALUES (
     'nasz_klient',
-    encode(digest('klient123', 'sha256'), 'hex'),
+    '!',
     FALSE,
     (SELECT id FROM clients WHERE slug = 'nasz_klient'),
     'active',
