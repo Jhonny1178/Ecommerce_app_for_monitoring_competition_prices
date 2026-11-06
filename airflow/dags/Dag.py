@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -1058,11 +1059,11 @@ def run_spider_for_client(
         "$PYTHONPATH:/opt/airflow/dags && "
         "cd /opt/airflow/dags/"
         "ecommerce_price_comparer && "
-        f"scrapy crawl {spider_name} "
+        f"scrapy crawl {shlex.quote(spider_name)} "
         "-s LOG_LEVEL=INFO "
         f"{limit_setting}"
-        f"-a target_table={target_table} "
-        f"-a store_prefix={prefix}"
+        f"-a target_table={shlex.quote(target_table)} "
+        f"-a store_prefix={shlex.quote(prefix)}"
     )
 
     started_at = datetime.now()

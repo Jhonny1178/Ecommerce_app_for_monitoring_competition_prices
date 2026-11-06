@@ -3,6 +3,8 @@ import re
 import gzip
 from urllib.parse import urljoin, urlparse
 
+from core.url_safety import safe_get, safe_head
+
 # Maskujemy się jako prawdziwa przeglądarka
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -23,13 +25,13 @@ def format_domain(url):
 
 def is_valid_sitemap(url):
     try:
-        response = requests.head(url, headers=HEADERS, timeout=5, allow_redirects=True)
+        response = safe_head(url, headers=HEADERS, timeout=5, allow_redirects=True)
         if response.status_code == 200:
             content_type = response.headers.get('Content-Type', '').lower()
             if 'xml' in content_type or 'gzip' in content_type or url.endswith('.gz'):
                 return True
             # Fallback dla źle skonfigurowanych serwerów
-            partial_body = requests.get(url, headers=HEADERS, timeout=5, stream=True)
+            partial_body = safe_get(url, headers=HEADERS, timeout=5, stream=True)
             chunk = next(partial_body.iter_content(chunk_size=100)).decode('utf-8', errors='ignore')
             if '<?xml' in chunk or '<urlset' in chunk or '<sitemapindex' in chunk:
                 return True
@@ -45,7 +47,7 @@ def rozpakuj_indeks(url):
     """
     print(f"   [Analiza] Zaglądam do wnętrza: {url}")
     try:
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = safe_get(url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
             return [url]
 
@@ -91,7 +93,7 @@ def find_sitemap(store_url):
     robots_url = urljoin(base_url, '/robots.txt')
     print("-> Krok 1: Przeszukanie pliku robots.txt...")
     try:
-        response = requests.get(robots_url, headers=HEADERS, timeout=5)
+        response = safe_get(robots_url, headers=HEADERS, timeout=5)
         if response.status_code == 200:
             for line in response.text.splitlines():
                 if line.lower().startswith('sitemap:'):

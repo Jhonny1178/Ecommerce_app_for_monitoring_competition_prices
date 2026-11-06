@@ -3,6 +3,8 @@ import gzip
 import re
 from urllib.parse import urlparse
 
+from core.url_safety import safe_get
+
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
 
@@ -32,6 +34,9 @@ def filter_grouped_products(urls_set):
     return final_urls
 
 
+MAX_SITEMAPS = 200
+
+
 def get_product_links(sitemap_urls):
     if isinstance(sitemap_urls, str):
         sitemap_urls = [sitemap_urls]
@@ -46,7 +51,7 @@ def get_product_links(sitemap_urls):
     zakazane_slowa = ['/kontakt', '/regulamin', '/koszyk', '/polityka', '/polityka-prywatnosci']
     zakazane_rozszerzenia = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf', '.svg']
 
-    while sitemaps_to_process:
+    while sitemaps_to_process and len(processed_sitemaps) < MAX_SITEMAPS:
         url = sitemaps_to_process.pop(0)
 
         if url in processed_sitemaps:
@@ -55,7 +60,7 @@ def get_product_links(sitemap_urls):
 
         print(f"Przetwarzanie sitemapy: {url}")
         try:
-            response = requests.get(url, headers=HEADERS, timeout=20)
+            response = safe_get(url, headers=HEADERS, timeout=20)
             response.raise_for_status()
 
             content = gzip.decompress(response.content) if url.endswith('.gz') else response.content

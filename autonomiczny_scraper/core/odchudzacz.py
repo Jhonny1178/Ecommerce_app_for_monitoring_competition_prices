@@ -2,6 +2,8 @@ import requests
 import re
 from bs4 import BeautifulSoup, Comment
 
+from core.url_safety import safe_get
+
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
 def wybierz_pewne_probki(linki_set, ilosc=3):
@@ -90,7 +92,7 @@ def build_llm_dataset(urls_to_process, output_filename):
         print(f"Pobieranie i analiza: {url} (Link {link_number})")
 
         try:
-            response = requests.get(url, headers=HEADERS, timeout=15)
+            response = safe_get(url, headers=HEADERS, timeout=15)
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')

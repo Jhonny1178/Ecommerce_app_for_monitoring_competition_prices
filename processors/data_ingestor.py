@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 from ecommerce_price_comparer.utilities.data_utility import DataCleaner
 from ecommerce_price_comparer.items import ProductData
+from ecommerce_price_comparer.utilities.url_safety import safe_get
 load_dotenv()
 
 class DataExtractor:
@@ -28,12 +29,12 @@ class DataExtractor:
             if self.source_type == 'url':
                 headers = {'User-Agent': 'Mozilla/5.0'}
                 if self.file_format in ['xlsx', 'excel']:
-                    response = requests.get(self.source_path, headers=headers)
+                    response = safe_get(self.source_path, headers=headers, timeout=60)
                     response.raise_for_status()
                     file_object = io.BytesIO(response.content)
                 else:
                     # XML i CSV szybszym strumieniem z mniejszym ramem excel potrzbuej calego pliku
-                    response = requests.get(self.source_path, headers=headers, stream=True,timeout=60)
+                    response = safe_get(self.source_path, headers=headers, stream=True,timeout=60)
                     response.raise_for_status()
                     response.raw.decode_content = True
                     file_object = response.raw

@@ -4,6 +4,8 @@
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
 from scrapy import signals
+from scrapy.exceptions import IgnoreRequest
+from ecommerce_price_comparer.utilities.url_safety import is_public_url
 from random import choice
 from urllib.parse import urlencode
 from random import randint
@@ -193,3 +195,11 @@ class SmartGeonodeProxyMiddleware:
             request.dont_filter = True
             spider.logger.warning(f"Connection failed ({exception}). Switching to proxy: {proxy}")
             return request
+
+
+
+class BlockInternalRequestsMiddleware:
+    def process_request(self, request, spider):
+        if not is_public_url(request.url):
+            raise IgnoreRequest(f"Niedozwolony adres: {request.url}")
+        return None
