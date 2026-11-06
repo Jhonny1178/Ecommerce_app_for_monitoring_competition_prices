@@ -27,7 +27,7 @@ DB_CONFIG = {
     "port": int(os.environ.get("APP_DB_PORT", 5434)),
     "dbname": os.environ.get("APP_DB_NAME", "ecommerce_data"),
     "user": os.environ.get("APP_DB_USER", "postgres"),
-    "password": os.environ.get("APP_DB_PASSWORD", "postgres"),
+    "password": os.environ.get("APP_DB_PASSWORD"),
 }
 
 # Definiujemy ścieżkę do projektu kolegi.

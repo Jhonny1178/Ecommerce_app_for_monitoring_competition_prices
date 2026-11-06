@@ -32,3 +32,4 @@ storage/file_folder/*
 !storage/file_folder/.gitkeep
 ecommerce_price_comparer/spiders/**/*.txt
 ecommerce_price_comparer/spiders/calvado_com/
+/Praca dyplomowa/

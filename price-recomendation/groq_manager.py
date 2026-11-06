@@ -11,7 +11,7 @@ class GroqManager:
         self.db_port = os.getenv("APP_DB_PORT", "5432")
         self.db_name = os.getenv("APP_DB_NAME", "ecommerce_data")
         self.db_user = os.getenv("APP_DB_USER", "postgres")
-        self.db_password = os.getenv("APP_DB_PASSWORD", "eroch")
+        self.db_password = os.getenv("APP_DB_PASSWORD")
         
         self.keys = {
             "GROQ_API_KEY_1": os.getenv("GROQ_API_KEY_1"),

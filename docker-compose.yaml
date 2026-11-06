@@ -50,19 +50,17 @@ x-airflow-common:
     context: .
     dockerfile: airflow/Dockerfile
   image: custom-airflow:2.9.1
-  env_file:
-    - ${ENV_FILE_PATH:-.env}
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?ustaw AIRFLOW_DB_PASSWORD w .env}@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?ustaw AIRFLOW_DB_PASSWORD w .env}@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:?ustaw AIRFLOW__API_AUTH__JWT_SECRET w .env}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
     # yamllint disable rule:line-length
     # Use simple http server on scheduler for health checks
@@ -76,6 +74,9 @@ x-airflow-common:
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
     APP_DB_HOST: 'ecommerce-db'
     APP_DB_PORT: '5432'
+    APP_DB_NAME: ${APP_DB_NAME}
+    APP_DB_USER: ${APP_DB_USER}
+    APP_DB_PASSWORD: ${APP_DB_PASSWORD}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./processors:/opt/airflow/dags/processors
@@ -97,10 +98,10 @@ services:
   postgres:
     image: postgres:16
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:?ustaw AIRFLOW_DB_PASSWORD w .env}
       POSTGRES_DB: airflow
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
@@ -113,25 +114,31 @@ services:
   ecommerce-db:
     image: postgres:16
     ports:
-      - "5434:5432" # Inny port, by uniknąć konfliktów z Airflow
+      - "127.0.0.1:5434:5432" # Inny port, by uniknąć konfliktów z Airflow
     environment:
-      POSTGRES_USER: ${APP_DB_USER}
-      POSTGRES_PASSWORD: ${APP_DB_PASSWORD}
+      POSTGRES_USER: ${DB_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${DB_SUPERUSER_PASSWORD:?ustaw DB_SUPERUSER_PASSWORD w .env}
       POSTGRES_DB: ${APP_DB_NAME}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     volumes:
       - ecommerce-data-volume:/var/lib/postgresql/data
       # Ten wpis to magia: Docker sam uruchomi ten plik SQL przy pierwszym starcie!
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./database/create_app_role.sh:/docker-entrypoint-initdb.d/02-create_app_role.sh
     restart: always
 
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
     # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
     image: redis:7.2-bookworm
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}
     expose:
       - 6379
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG']
       interval: 10s
       timeout: 30s
       retries: 50
@@ -142,7 +149,7 @@ services:
     <<: *airflow-common
     command: webserver
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
       interval: 30s
@@ -308,10 +315,10 @@ services:
           --lastname User \
           --role Admin \
           --email "$${_AIRFLOW_WWW_USER_EMAIL:-admin@example.com}" \
-          --password "$${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
-          || /entrypoint airflow users reset-password \
-              --username "$${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
-              --password "$${_AIRFLOW_WWW_USER_PASSWORD:-admin}"
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}"
+        /entrypoint airflow users reset-password \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}"
 
         echo
         echo "Fixing ownership of Airflow files..."
@@ -329,7 +336,7 @@ services:
       _AIRFLOW_DB_MIGRATE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:?ustaw _AIRFLOW_WWW_USER_PASSWORD w .env}
       _AIRFLOW_WWW_USER_EMAIL: ${_AIRFLOW_WWW_USER_EMAIL:-admin@example.com}
     user: "0:0"
 
@@ -350,10 +357,11 @@ services:
 
   recommendation_service:
     build: ./price-recomendation
+    user: "${AIRFLOW_UID:-50000}:0"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./price-recomendation:/app
+      - ./price-recomendation:/app:ro
     environment:
       - APP_DB_HOST=ecommerce-db
       - APP_DB_PORT=5432
@@ -371,7 +379,7 @@ services:
     profiles:
       - flower
     ports:
-      - "5555:5555"
+      - "127.0.0.1:5555:5555"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:5555/"]
       interval: 30s
@@ -386,8 +394,10 @@ services:
 
   ai_generator:
     build: ./autonomiczny_scraper
+    user: "${AIRFLOW_UID:-50000}:0"
+    mem_limit: 2g
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       # Flagi :delegated odciążają synchronizację z macOS
       - ./autonomiczny_scraper:/app:delegated
@@ -395,6 +405,7 @@ services:
       # Blokujemy synchronizację plików .pyc z hostem
       - /app/__pycache__
     environment:
+      - HOME=/tmp
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       # Wymusza na Uvicorn/Watchfiles tryb odpytywania (polling), zamiast nasłuchiwania zdarzeń FSEvents
@@ -415,11 +426,11 @@ services:
 
   webapp:
     build: ./webapp
+    user: "${AIRFLOW_UID:-50000}:0"
     ports:
-      - "6767:6767"
+      - "127.0.0.1:6767:6767"
     volumes:
-      - ./webapp:/app:delegated
-      - /app/__pycache__
+      - ./webapp:/app:ro
       - ./storage/file_folder:/shared/onboarding
     environment:
       - PYTHONUNBUFFERED=1
@@ -433,10 +444,17 @@ services:
       - ONBOARDING_UPLOAD_DIR=/shared/onboarding
       - EROCH_GMAIL=${EROCH_GMAIL}
       - GMAIL_USER=${GMAIL_USER}
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - CLIENT_PASSWORD=${CLIENT_PASSWORD:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - RATELIMIT_STORAGE_URI=redis://:${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}@redis:6379/1
     restart: always
     depends_on:
       ecommerce-db:
         condition: service_started
+      redis:
+        condition: service_healthy
 
   frontend:
     build: ./frontend
