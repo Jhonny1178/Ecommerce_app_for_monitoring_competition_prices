@@ -25,6 +25,7 @@ DATA_ENDPOINTS = [
     "/api/products", "/api/stats", "/api/filters", "/api/categories", "/api/stores",
     "/api/manufacturers", "/api/comparison", "/api/comparison/summary", "/api/report",
     "/api/products/1", "/api/products/1/price-history",
+    "/api/change-reports", "/api/change-reports/1",
     "/api/image-proxy?url=https://example.com/a.png",
 ]
 INACTIVE_STATUSES = ["onboarding_required", "awaiting_payment", "pending_admin", "rejected"]

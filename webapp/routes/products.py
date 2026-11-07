@@ -138,6 +138,11 @@ def _has_price_history_access(subscription_plan: str | None) -> bool:
         "premium",
     }
 
+def _store_key(name) -> str:
+    """Nazwa sklepu tylko z liter i cyfr (podpierzyna = pod_pierzyna)."""
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
 def _effective_price(price_normal, price_special):
     special = _to_float(price_special)
     normal = _to_float(price_normal)
@@ -751,7 +756,8 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
 
         image = None
         availability = None
-        competitor_sku = None
+        # Bez kolumny {sklep}_sku (starsze dopasowania) szukamy oferty po adresie i cenie.
+        competitor_sku = match_row.get(f"{store_name}_sku")
 
         competitor_price_normal = match_price
         special_column = f"{store_name}_price_special"
@@ -762,7 +768,31 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
             try:
                 extra = None
 
-                if url:
+                if competitor_sku:
+                    extra_query = sql.SQL("""
+                        SELECT
+                            sku,
+                            name,
+                            image,
+                            availability,
+                            price_normal,
+                            price_special,
+                            url,
+                            store
+                        FROM {}
+                        WHERE sku = %s
+                    """).format(sql.Identifier(competitors_table))
+
+                    cur.execute(extra_query, (competitor_sku,))
+                    extra = next(
+                        (
+                            row for row in cur.fetchall()
+                            if _store_key(row["store"]) == _store_key(store_name)
+                        ),
+                        None,
+                    )
+
+                if not extra and url:
                     extra_query = sql.SQL("""
                         SELECT
                             sku,
@@ -1595,7 +1625,8 @@ def api_product_price_history(product_id: int):
             if not competitor_sku or not competitor_store:
                 continue
 
-            pair_key = (competitor_sku, competitor_store)
+            # Historia ma 'podpierzyna', dopasowania 'pod_pierzyna'.
+            pair_key = (competitor_sku, _store_key(competitor_store))
 
             if pair_key in used_pairs:
                 continue
@@ -1616,13 +1647,15 @@ def api_product_price_history(product_id: int):
                         is_current
                     FROM {}
                     WHERE sku = %s
-                      AND store = %s
                     ORDER BY valid_from DESC
                 """).format(sql.Identifier(history_table)),
-                (competitor_sku, competitor_store)
+                (competitor_sku,)
             )
 
-            rows = cur.fetchall()
+            rows = [
+                row for row in cur.fetchall()
+                if _store_key(row["store"]) == pair_key[1]
+            ]
 
             for row in rows:
                 row = dict(row)
@@ -1645,7 +1678,7 @@ def api_product_price_history(product_id: int):
 
                 history_rows.append({
                     "sku": row.get("sku"),
-                    "store": row.get("store"),
+                    "store": competitor_store,
                     "name": competitor.get("name"),
                     "url": competitor.get("url"),
                     "image": competitor.get("image"),
@@ -1663,6 +1696,9 @@ def api_product_price_history(product_id: int):
                     "valid_to": row.get("valid_to").isoformat() if row.get("valid_to") else None,
                     "is_current": row.get("is_current"),
                 })
+
+        # Od najnowszej zmiany.
+        history_rows.sort(key=lambda item: item["valid_from"] or "", reverse=True)
 
         return jsonify({
             "ok": True,

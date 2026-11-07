@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:tonten/core/api/api_client.dart';
 
 import '../../products/screens/products_list_screen.dart';
+import '../../changes/screens/change_reports_screen.dart';
 import '../../../core/utils/dialog_utils.dart';
 import '../../auth/screens/login_screen.dart';
 import '../../auth/screens/file_upload_screen.dart';
@@ -498,6 +499,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         height: 800,
                         child: ProductsListScreen(key: ValueKey('all_$_refreshCounter'), matchedOnly: false),
                       ),
+                    ] else if (_selectedTabIndex == 3) ...[
+                      SizedBox(
+                        height: 800,
+                        child: ChangeReportsScreen(key: ValueKey('changes_$_refreshCounter')),
+                      ),
                     ],
                   ],
                 ),
@@ -613,6 +619,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _buildTabButton('Dashboard', 0, colorScheme),
           _buildTabButton('Zmatchowane produkty', 1, colorScheme),
           _buildTabButton('Wszystkie produkty', 2, colorScheme),
+          _buildTabButton('Raporty zmian', 3, colorScheme),
         ],
       ),
     );

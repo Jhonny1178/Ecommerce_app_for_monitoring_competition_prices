@@ -17,6 +17,7 @@ from extensions import limiter
 from manage_users import sync_shared_passwords_from_env
 from routes.products import products_bp
 from routes.auth import auth_bp
+from routes.changes import changes_bp
 from datetime import timedelta
 
 load_dotenv()
@@ -752,6 +753,7 @@ def admin_upload_confirm():
 
 app.register_blueprint(products_bp)
 app.register_blueprint(auth_bp)
+app.register_blueprint(changes_bp)
 
 sync_shared_passwords_from_env()
 
