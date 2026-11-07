@@ -262,6 +262,198 @@ def _flat_competitor_price_columns(match_columns: set[str]) -> list[str]:
     ]
 
 
+def _store_key(name) -> str:
+    """Nazwa sklepu tylko z liter i cyfr (podpierzyna = pod_pierzyna)."""
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
+def _competitor_price_columns(match_columns: set[str], store: str | None = None) -> list[tuple[str, str | None]]:
+    """Kolumny (cena, cena promocyjna) sklepów konkurencji w matches, opcjonalnie jednego sklepu."""
+    result = []
+
+    for price_column in _flat_competitor_price_columns(match_columns):
+        store_name = price_column[:-len("_price")]
+
+        if store and _store_key(store_name) != _store_key(store):
+            continue
+
+        special_column = f"{store_name}_price_special"
+        result.append((price_column, special_column if special_column in match_columns else None))
+
+    return result
+
+
+_CLIENT_PRICE_SQL = sql.SQL("(CASE WHEN p.price_special > 0 THEN p.price_special ELSE p.price_normal END)")
+
+PRICE_DIFF_DIRECTIONS = {"higher", "lower"}
+PRICE_DIFF_UNITS = {"pln", "percent"}
+
+
+def _competitor_price_sql(price_column: str, special_column: str | None):
+    price = sql.SQL("CAST(m.{} AS double precision)").format(sql.Identifier(price_column))
+
+    if not special_column:
+        return price
+
+    special = sql.SQL("CAST(m.{} AS double precision)").format(sql.Identifier(special_column))
+    return sql.SQL("(CASE WHEN {special} > 0 THEN {special} ELSE {price} END)").format(
+        special=special,
+        price=price,
+    )
+
+
+def _price_difference_lateral(match_columns: set[str], matches_table: str, store: str | None,
+                              direction: str, diff_min: float | None, diff_max: float | None, unit: str):
+    """Złączenie "d" z różnicami cen produktu p (cena konkurencji - cena klienta).
+
+    Liczy tylko ceny spełniające filtr: qualifying, max_abs_diff, max_abs_pct,
+    min_diff_pct, max_diff_pct. Zwraca (sql, parametry) albo (None, []).
+    """
+    columns = _competitor_price_columns(match_columns, store)
+
+    if "client_sku" not in match_columns or not columns:
+        return None, []
+
+    prices = sql.SQL(", ").join(
+        sql.SQL("({})").format(_competitor_price_sql(price_column, special_column))
+        for price_column, special_column in columns
+    )
+    difference = sql.SQL("(c.price - {})").format(_CLIENT_PRICE_SQL)
+    percent = sql.SQL("({} * 100.0 / NULLIF({}, 0))").format(difference, _CLIENT_PRICE_SQL)
+    amount = sql.SQL("ABS({})").format(percent if unit == "percent" else difference)
+
+    conditions = [sql.SQL("{} IS NOT NULL").format(difference)]
+    params = []
+
+    if direction == "higher":
+        conditions.append(sql.SQL("{} > 0").format(difference))
+    elif direction == "lower":
+        conditions.append(sql.SQL("{} < 0").format(difference))
+
+    if diff_min is not None:
+        conditions.append(sql.SQL("{} >= %s").format(amount))
+        params.append(diff_min)
+
+    if diff_max is not None:
+        conditions.append(sql.SQL("{} <= %s").format(amount))
+        params.append(diff_max)
+
+    lateral = sql.SQL("""
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) AS qualifying,
+                MAX(ABS({difference})) AS max_abs_diff,
+                MAX(ABS({percent})) AS max_abs_pct,
+                MIN({percent}) AS min_diff_pct,
+                MAX({percent}) AS max_diff_pct
+            FROM {matches} m
+            CROSS JOIN LATERAL (VALUES {prices}) AS c(price)
+            WHERE m.client_sku = p.sku
+              AND {conditions}
+        ) d ON TRUE
+    """).format(
+        difference=difference,
+        percent=percent,
+        matches=sql.Identifier(matches_table),
+        prices=prices,
+        conditions=sql.SQL(" AND ").join(conditions),
+    )
+
+    return lateral, params
+
+
+_SORT_EXPRESSIONS = {
+    "name": sql.SQL("p.name"),
+    "price": _CLIENT_PRICE_SQL,
+    "diff_pln": sql.SQL("d.max_abs_diff"),
+    "diff_percent": sql.SQL("d.max_abs_pct"),
+}
+_GROUP_SORT_EXPRESSIONS = {
+    "name": sql.SQL("name"),
+    "price": sql.SQL("min_price"),
+    "diff_pln": sql.SQL("max_abs_diff"),
+    "diff_percent": sql.SQL("max_abs_pct"),
+}
+_DIFF_SORTS = {"diff_pln", "diff_percent"}
+
+_GROUP_NAME_SQL = sql.SQL("LOWER(BTRIM(p.name))")
+_GROUP_MAKER_SQL = sql.SQL("COALESCE(p.manufacturer, '')")
+
+
+def _add_price_comparison(cur, matches_table: str, products: list[dict], store: str | None = None) -> list[dict]:
+    """Dodaje do produktów ceny konkurencji z różnicą (competitor_prices)."""
+    if not products or not _table_exists(cur, matches_table):
+        return products
+
+    match_columns = _get_columns(cur, matches_table)
+    columns = _competitor_price_columns(match_columns, store)
+
+    if "client_sku" not in match_columns or not columns:
+        return products
+
+    selected = ["client_sku"] + [
+        column
+        for price_column, special_column in columns
+        for column in (price_column, special_column)
+        if column
+    ]
+    query = sql.SQL("SELECT {} FROM {} WHERE client_sku = ANY(%s)").format(
+        sql.SQL(", ").join(sql.Identifier(column) for column in selected),
+        sql.Identifier(matches_table),
+    )
+    cur.execute(query, ([p["sku"] for p in products if p.get("sku")],))
+    rows = {row["client_sku"]: dict(row) for row in cur.fetchall()}
+
+    result = []
+
+    for product in products:
+        item = dict(product)
+        row = rows.get(item.get("sku"))
+        client_price = _effective_price(item.get("price_normal"), item.get("price_special"))
+        prices = []
+
+        for price_column, special_column in columns if row else []:
+            competitor_price = _effective_price(
+                row.get(price_column),
+                row.get(special_column) if special_column else None,
+            )
+
+            if competitor_price is None:
+                continue
+
+            difference = competitor_price - client_price if client_price is not None else None
+            prices.append({
+                "store": price_column[:-len("_price")],
+                "price": round(competitor_price, 2),
+                "difference": round(difference, 2) if difference is not None else None,
+                "difference_percent": (
+                    round(difference * 100.0 / client_price, 1)
+                    if difference is not None and client_price
+                    else None
+                ),
+            })
+
+        item["competitor_prices"] = prices
+        result.append(item)
+
+    return result
+
+
+def _optional_amount(name: str):
+    """Liczba nieujemna z parametru zapytania albo None, gdy pusty."""
+    raw = request.args.get(name, "").strip().replace(",", ".")
+
+    if not raw:
+        return None
+
+    value = float(raw)
+
+    if value < 0 or value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(name)
+
+    return value
+
+
 def _flat_has_competitor_sql(match_columns: set[str]):
     price_cols = _flat_competitor_price_columns(match_columns)
 
@@ -561,9 +753,10 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
         availability = None
         competitor_sku = None
 
-        # Domyślnie bierzemy cenę z matches, ale później nadpisujemy ją pełnymi danymi z competitors_table.
         competitor_price_normal = match_price
-        competitor_price_special = None
+        special_column = f"{store_name}_price_special"
+        has_special_column = special_column in match_row
+        competitor_price_special = match_row.get(special_column) if has_special_column else None
 
         if competitors_exist:
             try:
@@ -582,10 +775,11 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
                         FROM {}
                         WHERE TRIM(TRAILING '/' FROM url) =
                               TRIM(TRAILING '/' FROM %s)
+                        ORDER BY (price_normal IS NOT DISTINCT FROM %s) DESC
                         LIMIT 1
                     """).format(sql.Identifier(competitors_table))
 
-                    cur.execute(extra_query, (url,))
+                    cur.execute(extra_query, (url, _to_float(match_price)))
                     extra = cur.fetchone()
 
                 # Awaryjne wyszukanie po nazwie i sklepie,
@@ -603,10 +797,11 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
                         FROM {}
                         WHERE LOWER(store) = LOWER(%s)
                           AND LOWER(name) = LOWER(%s)
+                        ORDER BY (price_normal IS NOT DISTINCT FROM %s) DESC
                         LIMIT 1
                     """).format(sql.Identifier(competitors_table))
 
-                    cur.execute(extra_query, (store_name, name))
+                    cur.execute(extra_query, (store_name, name, _to_float(match_price)))
                     extra = cur.fetchone()
 
                 if extra:
@@ -617,11 +812,12 @@ def _fetch_competitors_for_product(cur, product: dict, matches_table: str, compe
                     availability = extra.get("availability")
                     url = url or extra.get("url")
 
-                    if extra.get("price_normal") is not None:
-                        competitor_price_normal = extra.get("price_normal")
+                    if not has_special_column:
+                        if extra.get("price_normal") is not None:
+                            competitor_price_normal = extra.get("price_normal")
 
-                    if extra.get("price_special") is not None:
-                        competitor_price_special = extra.get("price_special")
+                        if extra.get("price_special") is not None:
+                            competitor_price_special = extra.get("price_special")
 
             except Exception as e:
                 print(
@@ -934,10 +1130,33 @@ def api_products():
     price_max = request.args.get("price_max", "").strip()
     min_matches = request.args.get("min_matches", type=int)
 
+    price_diff = request.args.get("price_diff", "").strip().lower()
+    diff_unit = request.args.get("diff_unit", "pln").strip().lower() or "pln"
+
+    try:
+        diff_min = _optional_amount("diff_min")
+        diff_max = _optional_amount("diff_max")
+    except ValueError:
+        return jsonify({"ok": False, "error": "Różnica ceny musi być liczbą nieujemną"}), 400
+
+    if (price_diff and price_diff not in PRICE_DIFF_DIRECTIONS) or diff_unit not in PRICE_DIFF_UNITS:
+        return jsonify({"ok": False, "error": "Nieprawidłowy filtr różnicy ceny"}), 400
+
+    price_diff_filter_active = bool(price_diff) or diff_min is not None or diff_max is not None
+
+    group_mode = request.args.get("group", "false").lower() == "true"
+    group_name = request.args.get("group_name")
+    group_maker = request.args.get("group_maker", "")
+
     allowed_sort_columns = ["id", "sku", "name", "price_normal", "price_special", "category", "store", "availability"]
-    if sort_by not in allowed_sort_columns: sort_by = "id"
+    if group_mode:
+        if sort_by not in _GROUP_SORT_EXPRESSIONS: sort_by = "name"
+    elif sort_by not in _SORT_EXPRESSIONS and sort_by not in allowed_sort_columns:
+        sort_by = "id"
     if order not in ["ASC", "DESC"]: order = "ASC"
 
+    page = max(page or 1, 1)
+    per_page = min(max(per_page or 20, 1), 100)
     offset = (page - 1) * per_page
     where_parts = []
     params = []
@@ -964,6 +1183,10 @@ def api_products():
         where_parts.append(sql.SQL("(COALESCE(p.price_special, p.price_normal) <= %s)"))
         params.append(float(price_max))
 
+    if group_name is not None:
+        where_parts.append(sql.SQL("{} = LOWER(BTRIM(%s)) AND {} = %s").format(_GROUP_NAME_SQL, _GROUP_MAKER_SQL))
+        params.extend([group_name, group_maker or ""])
+
     conn = None
     cursor = None
 
@@ -974,8 +1197,9 @@ def api_products():
         if not _table_exists(cursor, products_table):
             return jsonify({"ok": True, "data": [], "pagination": {"total_items": 0, "current_page": page, "per_page": per_page, "total_pages": 1}})
 
-        if matched_only:
-            where_parts.append(_get_matched_products_filter(cursor, matches_table))
+        matched_filter = _get_matched_products_filter(cursor, matches_table) if matched_only else None
+        if matched_filter is not None:
+            where_parts.append(matched_filter)
 
         if store and _table_exists(cursor, matches_table):
             match_columns = _get_columns(cursor, matches_table)
@@ -991,9 +1215,9 @@ def api_products():
                 """).format(sql.Identifier(matches_table), sql.Identifier(competitors_table)))
                 params.append(store)
             else:
-                store_safe = store.lower().replace(" ", "_")
-                store_col = f"{store_safe}_price"
-                if store_col in match_columns:
+                store_columns = _competitor_price_columns(match_columns, store)
+                store_col = store_columns[0][0] if store_columns else None
+                if store_col:
                     if "product_id" in match_columns:
                         where_parts.append(sql.SQL("p.id IN (SELECT m.product_id FROM {} m WHERE m.{} IS NOT NULL)").format(sql.Identifier(matches_table), sql.Identifier(store_col)))
                     elif "client_sku" in match_columns:
@@ -1022,23 +1246,61 @@ def api_products():
             else:
                 where_parts.append(sql.SQL("FALSE"))
 
+        lateral = None
+        lateral_params = []
+        if (price_diff_filter_active or sort_by in _DIFF_SORTS or group_mode) and _table_exists(cursor, matches_table):
+            lateral, lateral_params = _price_difference_lateral(
+                _get_columns(cursor, matches_table),
+                matches_table,
+                store or None,
+                price_diff,
+                diff_min,
+                diff_max,
+                diff_unit,
+            )
+
+        if price_diff_filter_active:
+            where_parts.append(sql.SQL("COALESCE(d.qualifying, 0) > 0") if lateral is not None else sql.SQL("FALSE"))
+
+        if sort_by in _DIFF_SORTS and lateral is None:
+            sort_by = "name"
+
         where_sql = sql.SQL("")
         if where_parts:
             where_sql = sql.SQL("WHERE ") + sql.SQL(" AND ").join(where_parts)
 
-        count_query = sql.SQL("SELECT COUNT(p.id) AS total FROM {} p {}").format(sql.Identifier(products_table), where_sql)
-        cursor.execute(count_query, tuple(params))
+        from_sql = sql.SQL("FROM {} p {} {}").format(
+            sql.Identifier(products_table),
+            lateral if lateral is not None else sql.SQL(""),
+            where_sql,
+        )
+        base_params = lateral_params + params
+
+        if group_mode:
+            return _grouped_products_response(
+                cursor, products_table, from_sql, base_params, lateral is not None,
+                matched_filter, sort_by, order, page, per_page,
+            )
+
+        count_query = sql.SQL("SELECT COUNT(p.id) AS total {}").format(from_sql)
+        cursor.execute(count_query, tuple(base_params))
         total_items = cursor.fetchone()["total"]
+
+        if sort_by in _SORT_EXPRESSIONS:
+            order_sql = sql.SQL("{} {} NULLS LAST, p.id").format(_SORT_EXPRESSIONS[sort_by], sql.SQL(order))
+        else:
+            order_sql = sql.SQL("{} {}").format(sql.Identifier(sort_by), sql.SQL(order))
 
         query = sql.SQL("""
             SELECT p.id, p.sku, p.name, p.size, p.color, p.manufacturer, p.category, p.price_normal, p.price_special, p.store, p.availability, p.url, p.image, p.description
-            FROM {} p {} ORDER BY {} {} LIMIT %s OFFSET %s
-        """).format(sql.Identifier(products_table), where_sql, sql.Identifier(sort_by), sql.SQL(order))
+            {} ORDER BY {} LIMIT %s OFFSET %s
+        """).format(from_sql, order_sql)
 
-        cursor.execute(query, tuple(params + [per_page, offset]))
+        cursor.execute(query, tuple(base_params + [per_page, offset]))
         products = [dict(row) for row in cursor.fetchall()]
 
         products = _add_match_counts(cursor, matches_table, products)
+        products = _add_price_comparison(cursor, matches_table, products, store or None)
         products = [_prepare_product_for_response(product) for product in products]
 
         return jsonify({
@@ -1052,6 +1314,111 @@ def api_products():
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
+
+
+def _rounded(value, digits=2):
+    return round(float(value), digits) if value is not None else None
+
+
+def _grouped_products_response(cursor, products_table, from_sql, params, has_differences,
+                               matched_filter, sort_by, order, page, per_page):
+    """Kafelki: jeden wiersz na produkt z liczbą wariantów i zakresem cen oraz różnic."""
+    differences = (
+        sql.SQL("d.max_abs_diff, d.max_abs_pct, d.min_diff_pct, d.max_diff_pct")
+        if has_differences
+        else sql.SQL("NULL::float AS max_abs_diff, NULL::float AS max_abs_pct, "
+                     "NULL::float AS min_diff_pct, NULL::float AS max_diff_pct")
+    )
+    variants = sql.SQL("""
+        SELECT p.id, p.name, p.manufacturer, p.category, p.image,
+               {client_price} AS display_price, {differences},
+               {group_name} AS group_name, {group_maker} AS group_maker
+        {from_sql}
+    """).format(
+        client_price=_CLIENT_PRICE_SQL,
+        differences=differences,
+        group_name=_GROUP_NAME_SQL,
+        group_maker=_GROUP_MAKER_SQL,
+        from_sql=from_sql,
+    )
+
+    cursor.execute(
+        sql.SQL("SELECT COUNT(*) AS total FROM (SELECT 1 FROM ({}) v GROUP BY group_name, group_maker) g").format(variants),
+        tuple(params),
+    )
+    total_groups = cursor.fetchone()["total"]
+
+    cursor.execute(sql.SQL("""
+        WITH v AS ({variants})
+        SELECT group_name, group_maker,
+               MIN(name) AS name, MIN(manufacturer) AS manufacturer, MIN(category) AS category,
+               (ARRAY_AGG(image ORDER BY id) FILTER (WHERE image IS NOT NULL AND image <> ''))[1] AS image,
+               MIN(id) AS first_id,
+               COUNT(*) AS variants_matching,
+               MIN(display_price) AS min_price, MAX(display_price) AS max_price,
+               MAX(max_abs_diff) AS max_abs_diff, MAX(max_abs_pct) AS max_abs_pct,
+               MIN(min_diff_pct) AS min_diff_pct, MAX(max_diff_pct) AS max_diff_pct
+        FROM v
+        GROUP BY group_name, group_maker
+        ORDER BY {sort} {order} NULLS LAST, group_name, group_maker
+        LIMIT %s OFFSET %s
+    """).format(
+        variants=variants,
+        sort=_GROUP_SORT_EXPRESSIONS[sort_by],
+        order=sql.SQL(order),
+    ), tuple(params + [per_page, (page - 1) * per_page]))
+    groups = [dict(row) for row in cursor.fetchall()]
+
+    totals = {}
+    if groups:
+        conditions = [sql.SQL("{} = ANY(%s)").format(_GROUP_NAME_SQL)]
+        if matched_filter is not None:
+            conditions.append(matched_filter)
+        cursor.execute(sql.SQL("""
+            SELECT {group_name} AS group_name, {group_maker} AS group_maker, COUNT(*) AS total
+            FROM {table} p
+            WHERE {conditions}
+            GROUP BY 1, 2
+        """).format(
+            group_name=_GROUP_NAME_SQL,
+            group_maker=_GROUP_MAKER_SQL,
+            table=sql.Identifier(products_table),
+            conditions=sql.SQL(" AND ").join(conditions),
+        ), ([group["group_name"] for group in groups],))
+        totals = {(row["group_name"], row["group_maker"]): row["total"] for row in cursor.fetchall()}
+
+    data = []
+    for group in groups:
+        data.append({
+            "group_name": group["group_name"],
+            "group_maker": group["group_maker"],
+            "name": group["name"],
+            "manufacturer": group["manufacturer"],
+            "category": group["category"],
+            "image": _proxied_image_url(group["image"]),
+            "first_id": group["first_id"],
+            "variants_matching": group["variants_matching"],
+            "variants_total": totals.get((group["group_name"], group["group_maker"]), group["variants_matching"]),
+            "min_price": _rounded(group["min_price"]),
+            "max_price": _rounded(group["max_price"]),
+            "max_abs_diff": _rounded(group["max_abs_diff"]),
+            "max_abs_pct": _rounded(group["max_abs_pct"], 1),
+            "min_diff_pct": _rounded(group["min_diff_pct"], 1),
+            "max_diff_pct": _rounded(group["max_diff_pct"], 1),
+        })
+
+    return jsonify({
+        "ok": True,
+        "mode": "group",
+        "data": data,
+        "pagination": {
+            "total_items": total_groups,
+            "current_page": page,
+            "per_page": per_page,
+            "total_pages": math.ceil(total_groups / per_page) if total_groups > 0 else 1,
+        },
+    })
+
 
 @products_bp.route("/api/products/<int:product_id>")
 @login_required
