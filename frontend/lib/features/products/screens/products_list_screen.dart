@@ -1,7 +1,35 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'product_details_screen.dart';
+import 'product_variants_screen.dart';
+import '../widgets/product_tiles.dart';
 import 'package:tonten/core/api/api_client.dart';
+
+class _SortOption {
+  final String label;
+  final String? sort;
+  final String order;
+  const _SortOption(this.label, this.sort, this.order);
+}
+
+const Map<String, _SortOption> _matchedSorts = {
+  'default': _SortOption('Sortuj: domyślnie', null, 'asc'),
+  'diff_pln_desc': _SortOption('Największa różnica (zł)', 'diff_pln', 'desc'),
+  'diff_percent_desc': _SortOption('Największa różnica (%)', 'diff_percent', 'desc'),
+  'diff_pln_asc': _SortOption('Najmniejsza różnica (zł)', 'diff_pln', 'asc'),
+  'diff_percent_asc': _SortOption('Najmniejsza różnica (%)', 'diff_percent', 'asc'),
+  'name_asc': _SortOption('Nazwa A–Z', 'name', 'asc'),
+  'name_desc': _SortOption('Nazwa Z–A', 'name', 'desc'),
+  'price_asc': _SortOption('Cena rosnąco', 'price', 'asc'),
+  'price_desc': _SortOption('Cena malejąco', 'price', 'desc'),
+};
+const Map<String, _SortOption> _allSorts = {
+  'default': _SortOption('Sortuj: domyślnie', null, 'asc'),
+  'name_asc': _SortOption('Nazwa A–Z', 'name', 'asc'),
+  'name_desc': _SortOption('Nazwa Z–A', 'name', 'desc'),
+  'price_asc': _SortOption('Cena rosnąco', 'price', 'asc'),
+  'price_desc': _SortOption('Cena malejąco', 'price', 'desc'),
+};
 
 class ProductsListScreen extends StatefulWidget {
   final bool matchedOnly;
@@ -27,6 +55,14 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
   int? _minMatches;
   final TextEditingController _minPriceController = TextEditingController();
   final TextEditingController _maxPriceController = TextEditingController();
+
+  String? _priceDiff;
+  String _diffUnit = 'pln';
+  String _sortKey = 'default';
+
+  Map<String, _SortOption> get _sortOptions => widget.matchedOnly ? _matchedSorts : _allSorts;
+  final TextEditingController _diffMinController = TextEditingController();
+  final TextEditingController _diffMaxController = TextEditingController();
 
   List<String> _availableCategories = [];
   List<String> _availableBrands = [];
@@ -65,6 +101,8 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
     _searchController.dispose();
     _minPriceController.dispose();
     _maxPriceController.dispose();
+    _diffMinController.dispose();
+    _diffMaxController.dispose();
     super.dispose();
   }
 
@@ -101,17 +139,13 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
       if (_selectedBrand != null && _selectedBrand!.isNotEmpty) {
         urlStr += "&brand=${Uri.encodeQueryComponent(_selectedBrand!)}";
       }
-      if (_selectedStore != null && _selectedStore!.isNotEmpty) {
-        urlStr += "&store=${Uri.encodeQueryComponent(_selectedStore!)}";
+      urlStr += _variantFilterQuery();
+      if (widget.matchedOnly) {
+        urlStr += "&group=true";
       }
-      if (_minMatches != null) {
-        urlStr += "&min_matches=$_minMatches";
-      }
-      if (_minPriceController.text.isNotEmpty) {
-        urlStr += "&price_min=${_minPriceController.text}";
-      }
-      if (_maxPriceController.text.isNotEmpty) {
-        urlStr += "&price_max=${_maxPriceController.text}";
+      final sortOption = _sortOptions[_sortKey];
+      if (sortOption?.sort != null) {
+        urlStr += "&sort=${sortOption!.sort}&order=${sortOption.order}";
       }
 
       final response = await ApiClient.get(Uri.parse(urlStr), headers: {'Accept': 'application/json'});
@@ -151,6 +185,11 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
       _minMatches = null;
       _minPriceController.clear();
       _maxPriceController.clear();
+      _priceDiff = null;
+      _diffUnit = 'pln';
+      _diffMinController.clear();
+      _diffMaxController.clear();
+      _sortKey = 'default';
       _searchController.clear();
       _searchQuery = "";
       _currentPage = 1;
@@ -158,10 +197,61 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
     _fetchProducts();
   }
 
-  num? _toNum(dynamic value) {
-    if (value == null) return null;
-    if (value is num) return value;
-    return num.tryParse(value.toString());
+  /// Filtry pojedynczych wariantów, używane też przez listę wariantów kafelka.
+  String _variantFilterQuery() {
+    var query = '';
+    if (_selectedStore != null && _selectedStore!.isNotEmpty) {
+      query += "&store=${Uri.encodeQueryComponent(_selectedStore!)}";
+    }
+    if (_minMatches != null) {
+      query += "&min_matches=$_minMatches";
+    }
+    if (_minPriceController.text.isNotEmpty) {
+      query += "&price_min=${Uri.encodeQueryComponent(_minPriceController.text)}";
+    }
+    if (_maxPriceController.text.isNotEmpty) {
+      query += "&price_max=${Uri.encodeQueryComponent(_maxPriceController.text)}";
+    }
+    if (widget.matchedOnly) {
+      query += _priceDiffQuery();
+    }
+    return query;
+  }
+
+  void _openGroup(dynamic group) {
+    final int matching = int.tryParse('${group['variants_matching'] ?? 0}') ?? 0;
+    final int total = int.tryParse('${group['variants_total'] ?? matching}') ?? matching;
+    final Widget screen = matching == 1 && total == 1
+        ? ProductDetailsScreen(productId: group['first_id'])
+        : ProductVariantsScreen(
+            title: group['name']?.toString() ?? 'Warianty',
+            groupName: group['group_name']?.toString() ?? '',
+            groupMaker: group['group_maker']?.toString() ?? '',
+            filterQuery: _variantFilterQuery(),
+            variantsMatching: matching,
+            variantsTotal: total,
+          );
+    Navigator.push(context, MaterialPageRoute(builder: (context) => screen)).then((_) => _fetchProducts());
+  }
+
+  String _priceDiffQuery() {
+    final diffMin = _diffMinController.text.trim().replaceAll(',', '.');
+    final diffMax = _diffMaxController.text.trim().replaceAll(',', '.');
+    var query = '';
+
+    if (_priceDiff != null) {
+      query += "&price_diff=$_priceDiff";
+    }
+    if (diffMin.isNotEmpty) {
+      query += "&diff_min=${Uri.encodeQueryComponent(diffMin)}";
+    }
+    if (diffMax.isNotEmpty) {
+      query += "&diff_max=${Uri.encodeQueryComponent(diffMax)}";
+    }
+    if (diffMin.isNotEmpty || diffMax.isNotEmpty) {
+      query += "&diff_unit=$_diffUnit";
+    }
+    return query;
   }
 
   @override
@@ -231,6 +321,11 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
 
             _buildPriceRange(colorScheme),
 
+            if (widget.matchedOnly)
+              _buildPriceDiffFilter(colorScheme),
+
+            _buildSortDropdown(colorScheme),
+
             TextButton.icon(
               onPressed: _clearFilters,
               icon: const Icon(Icons.clear, size: 16),
@@ -250,7 +345,23 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
                       itemCount: _products.length,
                       separatorBuilder: (context, index) => Divider(height: 1, color: colorScheme.outlineVariant.withOpacity(0.3)),
                       itemBuilder: (context, index) {
-                        return _buildFlatProductRow(_products[index], colorScheme);
+                        final item = _products[index];
+                        if (widget.matchedOnly) {
+                          return ProductGroupTile(
+                            group: item,
+                            filtersActive: _variantFilterQuery().isNotEmpty,
+                            onTap: () => _openGroup(item),
+                          );
+                        }
+                        return ProductRow(
+                          product: item,
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ProductDetailsScreen(productId: item['id'], showPriceRecommendation: false),
+                            ),
+                          ).then((_) => _fetchProducts()),
+                        );
                       },
                     ),
         ),
@@ -374,87 +485,120 @@ class _ProductsListScreenState extends State<ProductsListScreen> {
     );
   }
 
-  Widget _buildFlatProductRow(dynamic product, ColorScheme colorScheme) {
-    final String name = product['name']?.toString() ?? 'Brak nazwy';
-    final String sku = product['sku']?.toString() ?? 'N/A';
-    final num? price = _toNum(
-      product['display_price'] ??
-          product['price'] ??
-          product['price_special'] ??
-          product['price_normal'],
-    );
-    final String imageUrl = product['image']?.toString() ?? '';
-    final int competitorsCount = int.tryParse('${product['competitors_count'] ?? 0}') ?? 0;
+  Widget _buildPriceDiffFilter(ColorScheme colorScheme) {
+    void apply() {
+      setState(() => _currentPage = 1);
+      _fetchProducts();
+    }
 
-    return InkWell(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (context) => ProductDetailsScreen(productId: product['id'])),
-        ).then((_) {
-          _fetchProducts();
-        });
-      },
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 8.0),
-        child: Row(
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: colorScheme.surfaceContainerHighest.withOpacity(0.3),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: imageUrl.isNotEmpty
-                  ? ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.network(
-                        imageUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) => const Icon(Icons.image_not_supported, size: 24),
-                      ),
-                    )
-                  : const Icon(Icons.inventory, size: 24),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15), maxLines: 2, overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 4),
-                  Text("SKU: $sku | Kat: ${product['category'] ?? '-'} | Marka: ${product['manufacturer'] ?? '-'}", style: TextStyle(color: colorScheme.onSurfaceVariant, fontSize: 12)),
-                ],
-              ),
-            ),
-            const SizedBox(width: 16),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  price != null ? "${price.toStringAsFixed(2)} zł" : "-",
-                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: colorScheme.primary),
-                ),
-                if (competitorsCount > 0) ...[
-                  const SizedBox(height: 6),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.compare_arrows, size: 14, color: colorScheme.secondary),
-                      const SizedBox(width: 4),
-                      Text(
-                        '$competitorsCount dopasowań',
-                        style: TextStyle(color: colorScheme.secondary, fontSize: 12, fontWeight: FontWeight.bold),
-                      ),
-                    ],
-                  ),
-                ],
+    Widget amountField(TextEditingController controller, String hint, Key key) {
+      return SizedBox(
+        width: 90,
+        height: 38,
+        child: TextField(
+          key: key,
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          style: const TextStyle(fontSize: 13),
+          decoration: InputDecoration(
+            hintText: hint,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          onSubmitted: (_) => apply(),
+        ),
+      );
+    }
+
+    BoxDecoration boxDecoration() => BoxDecoration(
+          color: colorScheme.surface,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: colorScheme.outlineVariant.withOpacity(0.4)),
+        );
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: boxDecoration(),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String?>(
+              key: const Key('price_diff_dropdown'),
+              value: _priceDiff,
+              icon: const Icon(Icons.swap_vert, size: 18),
+              hint: const Text('Cena konkurencji: Wszystkie', style: TextStyle(fontSize: 13)),
+              items: const [
+                DropdownMenuItem(value: null, child: Text('Cena konkurencji: Wszystkie', style: TextStyle(fontSize: 13))),
+                DropdownMenuItem(value: 'higher', child: Text('Konkurencja droższa', style: TextStyle(fontSize: 13))),
+                DropdownMenuItem(value: 'lower', child: Text('Konkurencja tańsza', style: TextStyle(fontSize: 13))),
               ],
+              onChanged: (val) {
+                _priceDiff = val;
+                apply();
+              },
             ),
-            const SizedBox(width: 16),
-            Icon(Icons.chevron_right, color: colorScheme.outlineVariant, size: 20),
-          ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        amountField(_diffMinController, 'Różnica od', const Key('diff_min_field')),
+        const SizedBox(width: 8),
+        const Text("-", style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(width: 8),
+        amountField(_diffMaxController, 'Różnica do', const Key('diff_max_field')),
+        const SizedBox(width: 8),
+        Container(
+          height: 38,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: boxDecoration(),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              key: const Key('diff_unit_dropdown'),
+              value: _diffUnit,
+              items: const [
+                DropdownMenuItem(value: 'pln', child: Text('zł', style: TextStyle(fontSize: 13))),
+                DropdownMenuItem(value: 'percent', child: Text('%', style: TextStyle(fontSize: 13))),
+              ],
+              onChanged: (val) {
+                _diffUnit = val ?? 'pln';
+                if (_diffMinController.text.isNotEmpty || _diffMaxController.text.isNotEmpty) {
+                  apply();
+                } else {
+                  setState(() {});
+                }
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSortDropdown(ColorScheme colorScheme) {
+    return Container(
+      height: 38,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: colorScheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colorScheme.outlineVariant.withOpacity(0.4)),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          key: const Key('sort_dropdown'),
+          value: _sortOptions.containsKey(_sortKey) ? _sortKey : 'default',
+          icon: const Icon(Icons.sort, size: 18),
+          items: _sortOptions.entries
+              .map((entry) => DropdownMenuItem(value: entry.key, child: Text(entry.value.label, style: const TextStyle(fontSize: 13))))
+              .toList(),
+          onChanged: (val) {
+            setState(() {
+              _sortKey = val ?? 'default';
+              _currentPage = 1;
+            });
+            _fetchProducts();
+          },
         ),
       ),
     );

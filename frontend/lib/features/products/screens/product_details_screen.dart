@@ -3,13 +3,20 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:tonten/core/api/api_client.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../auth/screens/subscription_screen.dart';
+
+/// Adres produktu klienta bez dopisku feedu (".feed10000.html").
+String clientProductUrl(String? url) => (url ?? '').replaceFirst(RegExp(r'\.feed\d+\.html$'), '.html');
 
 class ProductDetailsScreen extends StatefulWidget {
   final int productId;
 
+  final bool showPriceRecommendation;
+
   const ProductDetailsScreen({
     super.key,
     required this.productId,
+    this.showPriceRecommendation = true,
   });
 
   @override
@@ -42,6 +49,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     return plan == 'pro' ||
         plan == 'enterprise' ||
         plan == 'premium';
+  }
+
+  Future<void> _openPlans() async {
+    final changed = await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SubscriptionScreen(isChangingPlan: true, currentPlan: _subscriptionPlan),
+      ),
+    );
+    if (changed == true) _fetchDetails();
   }
 
   Future<void> _launchCompetitorUrl(String? urlString) async {
@@ -275,11 +291,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                               flex: 2,
                                               child: _buildCompetitorsSection(colorScheme),
                                             ),
-                                            const SizedBox(width: 32),
-                                            Expanded(
-                                              flex: 1,
-                                              child: _buildRecommendationSection(colorScheme),
-                                            ),
+                                            if (widget.showPriceRecommendation) ...[
+                                              const SizedBox(width: 32),
+                                              Expanded(
+                                                flex: 1,
+                                                child: _buildRecommendationSection(colorScheme),
+                                              ),
+                                            ],
                                           ],
                                         ),
                                       ),
@@ -307,11 +325,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                   flex: 2,
                                   child: _buildSpecificationTab(colorScheme),
                                 ),
-                                const SizedBox(width: 32),
-                                Expanded(
-                                  flex: 1,
-                                  child: _buildRecommendationSection(colorScheme),
-                                ),
+                                if (widget.showPriceRecommendation) ...[
+                                  const SizedBox(width: 32),
+                                  Expanded(
+                                    flex: 1,
+                                    child: _buildRecommendationSection(colorScheme),
+                                  ),
+                                ],
                               ],
                             ),
                           ),
@@ -334,6 +354,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
 
     final String imageUrl = _product?['image']?.toString() ?? '';
+    final String size = _product?['size']?.toString() ?? '';
+    final String color = _product?['color']?.toString() ?? '';
+    final String details = [
+      "SKU: $sku",
+      if (size.isNotEmpty) "Rozmiar: $size",
+      if (color.isNotEmpty) "Kolor: $color",
+    ].join(' | ');
+    final String productUrl = clientProductUrl(_product?['url']?.toString());
 
     return Container(
       padding: const EdgeInsets.all(24),
@@ -377,12 +405,37 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  "SKU: $sku",
+                  details,
                   style: TextStyle(
                     color: colorScheme.onSurfaceVariant,
                     fontSize: 16,
                   ),
                 ),
+                if (productUrl.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  InkWell(
+                    key: const Key('client_product_link'),
+                    onTap: () => _launchCompetitorUrl(productUrl),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.open_in_new, size: 16, color: colorScheme.primary),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            "Zobacz produkt w sklepie",
+                            style: TextStyle(
+                              color: colorScheme.primary,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              decoration: TextDecoration.underline,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -708,7 +761,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            "Ta funkcja jest dostępna w pakietach Pro i Enterprise.",
+            "Ta funkcja jest dostępna w pakietach Pro i Premium.",
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 14,
@@ -717,15 +770,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           ),
           const SizedBox(height: 20),
           FilledButton.icon(
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("Przejdź do wyboru pakietu w panelu użytkownika."),
-                ),
-              );
-            },
+            key: const Key('change_plan_history'),
+            onPressed: _openPlans,
             icon: const Icon(Icons.workspace_premium),
-            label: const Text("Zobacz pakiety"),
+            label: const Text("Zmień pakiet"),
           ),
         ],
       ),
@@ -988,6 +1036,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               style: TextStyle(
                 fontSize: 13,
                 color: colorScheme.onSecondaryContainer.withOpacity(0.8),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Center(
+              child: FilledButton.icon(
+                key: const Key('change_plan_recommendation'),
+                onPressed: _openPlans,
+                icon: const Icon(Icons.workspace_premium),
+                label: const Text("Zmień pakiet"),
               ),
             ),
           ] else ...[
