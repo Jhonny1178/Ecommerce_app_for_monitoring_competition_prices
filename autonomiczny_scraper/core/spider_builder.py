@@ -65,11 +65,12 @@ class ReadyScraperSpider(scrapy.Spider):
         if response.status != 200:
             return
 
-        extracted_data = extract_data_using_map(response, self.css_map)
-        if not extracted_data:
-            return
-
-        yield self.build_product_data(extracted_data)
+        # extract_data_using_map zwraca liste rekordow (po jednym na wariant)
+        for raw_data in extract_data_using_map(response, self.css_map):
+            raw_data.setdefault('url', response.url)
+            item = self.build_product_data(raw_data)
+            if item is not None:
+                yield item
 
     def build_product_data(self, raw_data):
         sku = raw_data.get('sku') or raw_data.get('product_id')
