@@ -51,13 +51,15 @@ PIPELINE_SCHEDULE_CRON = os.environ.get(
     "PIPELINE_SCHEDULE_CRON",
     "0 9 * * *",
 )
-# Na pokaz lepiej wyczyścić tabelę competitors przed scrapowaniem,
-# żeby matching nie mielił setek tysięcy starych rekordów.
-# Produkcyjnie ustaw to na false.
+# Czyszczenie tabeli competitors przed scrapowaniem psuje historię cen (trigger reaguje tylko na UPDATE).
 DEMO_TRUNCATE_COMPETITORS = os.environ.get(
     "DEMO_TRUNCATE_COMPETITORS",
-    "true"
+    "false"
 ).lower() in ("1", "true", "yes", "y")
+
+COMPETITOR_MAX_AGE_DAYS = int(
+    os.environ.get("COMPETITOR_MAX_AGE_DAYS", "7")
+)
 
 SCRAPER_FAIL_DAG_ON_ERROR = os.environ.get(
     "SCRAPER_FAIL_DAG_ON_ERROR",
@@ -919,18 +921,13 @@ def remove_incomplete_match_rows(table_name):
         if conn:
             conn.close()
 def reset_competitors_table_for_demo(client, pipeline_run_id=None):
+    """Usuwa oferty starsze niż COMPETITOR_MAX_AGE_DAYS, a z DEMO_TRUNCATE_COMPETITORS czyści tabelę."""
     client_id = client["id"]
     prefix = client.get("store_prefix") or client["slug"]
     table_name = f"{prefix}_competitors"
 
-    if not DEMO_TRUNCATE_COMPETITORS:
-        print(f"[DEMO RESET] Skipping truncate for table={table_name}", flush=True)
-        return
-
     started_at = datetime.now()
     task_name = "reset_competitors_table"
-
-    print(f"[DEMO RESET] Truncating competitors table if exists: {table_name}", flush=True)
 
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -939,11 +936,28 @@ def reset_competitors_table_for_demo(client, pipeline_run_id=None):
         cur.execute("SELECT to_regclass(%s)", (table_name,))
         exists = cur.fetchone()[0]
 
-        if exists:
-            cur.execute(f"TRUNCATE TABLE {table_name} RESTART IDENTITY")
-            print(f"[DEMO RESET] Truncated table={table_name}", flush=True)
+        if not exists:
+            log_excerpt = f"Table not exists={table_name}"
+        elif DEMO_TRUNCATE_COMPETITORS:
+            print(f"[DEMO RESET] Truncating competitors table: {table_name}", flush=True)
+            cur.execute(
+                sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY").format(sql.Identifier(table_name))
+            )
+            log_excerpt = f"Truncated table={table_name}"
         else:
-            print(f"[DEMO RESET] Table does not exist yet: {table_name}", flush=True)
+            cutoff = started_at - timedelta(days=COMPETITOR_MAX_AGE_DAYS)
+            cur.execute(
+                sql.SQL("DELETE FROM {} WHERE date_of_download < %s").format(
+                    sql.Identifier(table_name)
+                ),
+                (cutoff,),
+            )
+            log_excerpt = (
+                f"Usunięte oferty starsze niż {COMPETITOR_MAX_AGE_DAYS} dni "
+                f"z {table_name}: {cur.rowcount}"
+            )
+
+        print(f"[DEMO RESET] {log_excerpt}", flush=True)
 
         conn.commit()
         cur.close()
@@ -956,7 +970,7 @@ def reset_competitors_table_for_demo(client, pipeline_run_id=None):
             "success",
             started_at=started_at,
             finished_at=datetime.now(),
-            log_excerpt=f"Truncated table={table_name}" if exists else f"Table not exists={table_name}",
+            log_excerpt=log_excerpt,
         )
 
     except Exception as e:
@@ -1189,6 +1203,66 @@ def brands_argument(brands):
         for brand in brands
     ]
     return "|".join(name for name in names if name)
+
+
+def store_key(name):
+    """Nazwa sklepu tylko z liter i cyfr (podpierzyna = pod_pierzyna)."""
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
+
+
+def remove_stale_offers(table_name, spider_name, refreshed_since):
+    """Usuwa oferty sklepu scrapera nieodświeżone od refreshed_since (nic, gdy przebieg nic nie zapisał)."""
+    conn = None
+    cur = None
+
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+
+        cur.execute(
+            sql.SQL("SELECT DISTINCT store FROM {}").format(sql.Identifier(table_name))
+        )
+        wanted = store_key(spider_name)
+        stores = [
+            store for (store,) in cur.fetchall()
+            if store is not None and store_key(store) == wanted
+        ]
+
+        if not stores:
+            return 0
+
+        cur.execute(
+            sql.SQL("""
+                SELECT COUNT(*) FROM {}
+                WHERE store = ANY(%s) AND date_of_download >= %s
+            """).format(sql.Identifier(table_name)),
+            (stores, refreshed_since),
+        )
+        if cur.fetchone()[0] == 0:
+            return 0
+
+        cur.execute(
+            sql.SQL("""
+                DELETE FROM {}
+                WHERE store = ANY(%s)
+                  AND (date_of_download < %s OR date_of_download IS NULL)
+            """).format(sql.Identifier(table_name)),
+            (stores, refreshed_since),
+        )
+        removed = cur.rowcount
+        conn.commit()
+        return removed
+
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 def run_spider_for_client(
@@ -1427,11 +1501,37 @@ def run_spider_for_client(
         spider_name,
     )
 
+    # Tylko po pełnym przebiegu: po limicie czasu albo błędach scraper mógł nie dojść do części ofert.
+    finish_reason = stats.get("finish_reason")
+    log_errors = stats.get("log_count/ERROR", 0)
+
+    if finish_reason == "finished" and not log_errors:
+        try:
+            removed = remove_stale_offers(target_table, spider_name, started_at)
+            stale_note = f"usunięte nieaktualne oferty: {removed}"
+            if removed:
+                row_count = count_rows(target_table)
+        except Exception as e:
+            stale_note = f"nie udało się usunąć nieaktualnych ofert: {e}"
+            save_error_log(
+                client_id,
+                "scraper",
+                f"Spider {spider_name}: {stale_note}",
+                error_type="warning",
+                error_code="stale_offers_cleanup_failed",
+            )
+    else:
+        stale_note = (
+            f"nieaktualnych ofert nie usunięto (finish_reason={finish_reason}"
+            f"{', błędy w logu' if log_errors else ''})"
+        )
+
     summary = (
         f"[SCRAPER] Finished "
         f"spider={spider_name}, "
         f"scraped_items={scraped_items}, "
-        f"target_rows={row_count}"
+        f"target_rows={row_count}\n"
+        f"[SCRAPER] Oferty konkurencji: {stale_note}"
     )
 
     warning = None
@@ -1483,6 +1583,76 @@ def run_spider_for_client(
         "target_rows": row_count,
         "warning": warning,
     }
+
+
+def failed_scrapers(pipeline_run_id):
+    """Scrapery zakończone błędem w tym przebiegu."""
+    if not pipeline_run_id:
+        return []
+
+    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT task_id FROM pipeline_task_runs
+                WHERE pipeline_run_id = %s
+                  AND task_id LIKE 'scraper\\_%%'
+                  AND status = 'failed'
+                """,
+                (pipeline_run_id,),
+            )
+            return sorted(task_id[len("scraper_"):].lower() for (task_id,) in cur.fetchall())
+    finally:
+        conn.close()
+
+
+def save_change_report(client, competitor_stores, pipeline_run_id=None):
+    """Zapisuje raport zmian; błąd jest tylko ostrzeżeniem i nie przerywa matchingu."""
+    from processors.change_report import update_change_report
+
+    prefix = client.get("store_prefix") or client["slug"]
+
+    try:
+        unchecked = failed_scrapers(pipeline_run_id)
+        conn = psycopg2.connect(**DB_CONFIG)
+        try:
+            summary = update_change_report(
+                conn,
+                prefix,
+                competitor_stores,
+                pipeline_run_id=pipeline_run_id,
+                unchecked_stores=unchecked,
+            )
+        finally:
+            conn.close()
+
+        if summary["baseline"]:
+            print(
+                f"[MATCHING] Raport zmian: zapisano stan odniesienia "
+                f"({summary['pairs']} par), pierwszy raport po kolejnej aktualizacji.",
+                flush=True,
+            )
+        else:
+            print(
+                f"[MATCHING] Raport zmian: zmiany cen {summary['price']}, "
+                f"nowe oferty {summary['new']}, wycofane {summary['removed']}"
+                + (f", nie sprawdzono: {', '.join(unchecked)}" if unchecked else ""),
+                flush=True,
+            )
+        return summary
+
+    except Exception as e:
+        message = f"Nie udało się zapisać raportu zmian: {e}"
+        print(f"[MATCHING] WARNING {message}", flush=True)
+        save_error_log(
+            client["id"],
+            "matching",
+            message,
+            error_type="warning",
+            error_code="change_report_failed",
+        )
+        return None
 
 
 @capture_task_prints(
@@ -1609,6 +1779,8 @@ def run_matching_for_client(client, pipeline_run_id=None):
                 matches_table
             )
         )
+
+        save_change_report(client, competitor_stores, pipeline_run_id)
 
         print(
             f"[MATCHING] Wygenerowano wierszy: "

@@ -34,6 +34,7 @@ class TestScraperResilience:
         monkeypatch.setattr(Dag, "clear_scraper_error", lambda *args, **kwargs: None)
         monkeypatch.setattr(Dag, "count_rows", lambda table: 10)
         monkeypatch.setattr(Dag, "get_client_brands", lambda prefix: [])
+        monkeypatch.setattr(Dag, "remove_stale_offers", lambda *args, **kwargs: 0)
 
     @staticmethod
     def _scrapy_stats_lines(items, finish_reason="closespider_itemcount", **extra):

@@ -149,6 +149,7 @@ class TestDagBrandsArgument:
         monkeypatch.setattr(Dag, "mark_scraper_error", lambda *args, **kwargs: None)
         monkeypatch.setattr(Dag, "clear_scraper_error", lambda *args, **kwargs: None)
         monkeypatch.setattr(Dag, "count_rows", lambda table: 10)
+        monkeypatch.setattr(Dag, "remove_stale_offers", lambda *args, **kwargs: 0)
 
     @staticmethod
     def run_and_get_command(client):

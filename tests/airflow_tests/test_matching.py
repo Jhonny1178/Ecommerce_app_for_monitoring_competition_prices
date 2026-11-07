@@ -75,6 +75,8 @@ class TestMatchProducts:
         assert pd.isna(result.loc["checks", "pod_pierzyna_price"])
         assert result.loc["lines", "pod_pierzyna_price"] == 654.9
         assert result.loc["lines", "pod_pierzyna_name"] == "pościel flanelowa soft lines cream"
+        assert result.loc["lines", "pod_pierzyna_sku"] == "pościel flanelowa soft lines cream", "SKU oferty jest potrzebny do historii cen"
+        assert pd.isna(result.loc["checks", "pod_pierzyna_sku"])
 
     def test_same_model_with_color_named_differently_is_matched(self):
         clients = [client_product(

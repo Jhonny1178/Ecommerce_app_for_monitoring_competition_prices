@@ -1,3 +1,4 @@
+from datetime import datetime
 from itemadapter import ItemAdapter
 import psycopg2
 import psycopg2.extras
@@ -5,6 +6,16 @@ import os
 from dotenv import load_dotenv
 from utilities.data_utility import DataCleaner
 load_dotenv()
+
+
+def offer_price(row):
+    """Cena promocyjna albo regularna; oferta bez ceny przegrywa."""
+    price_normal, price_special = row[6], row[7]
+    if price_special is not None and price_special > 0:
+        return price_special
+    return price_normal if price_normal is not None else float("inf")
+
+
 class EcommercePriceComparerPipeline:
     def __init__(self):
         self.to_lowercase_list = ['color','category','availability','manufacturer','name','size']
@@ -51,7 +62,9 @@ class SaveToPostgresSQLPipeline:
             database=os.getenv("APP_DB_NAME"),
         )
         self.cur = self.conn.cursor()
-        self.items_buffer = []
+        # Oferty zapisywane do bazy po zakończeniu pająka.
+        self.offers = {}
+        self.duplicate_skus = set()
         self.batch_size = 100
 
     def open_spider(self, spider):
@@ -123,6 +136,13 @@ class SaveToPostgresSQLPipeline:
             """)
 
             self.cur.execute(f"DROP TRIGGER IF EXISTS trigger_price_history ON {self.table_name};")
+
+            # Data pierwszego pojawienia się oferty (raport zmian).
+            self.cur.execute(f"ALTER TABLE {self.table_name} ADD COLUMN IF NOT EXISTS first_seen TIMESTAMP;")
+            self.cur.execute(
+                f"UPDATE {self.table_name} SET first_seen = date_of_download WHERE first_seen IS NULL;"
+            )
+
             self.cur.execute(f"""
                 CREATE TRIGGER trigger_price_history
                 AFTER UPDATE ON {self.table_name}
@@ -137,27 +157,37 @@ class SaveToPostgresSQLPipeline:
             spider.logger.info(f"[PIPELINE] Tabela {self.table_name} została już utworzona przez inny proces.")
 
     def process_item(self, item, spider):
+        if not item.get('sku'):
+            return item
 
         # Krotka musi idealnie pasować do kolejności kolumn w zapytaniu INSERT
         tuple_data = (
             item.get('sku'), item.get('name'), item.get('size'),
             item.get('color'), item.get('manufacturer'), item.get('category'),
             item.get('price_normal'), item.get('price_special'), item.get('store'),
-            item.get('availability'), item.get('date_of_download'),
+            item.get('availability'),
+            # Po niej DAG rozpoznaje oferty odświeżone w przebiegu.
+            item.get('date_of_download') or datetime.now().isoformat(),
             item.get('url'), item.get('image'), item.get('description')
         )
 
-        if item.get('sku'):
-            self.items_buffer.append(tuple_data)
+        # Jeden zapis na SKU w przebiegu (zostaje tańsza oferta), inaczej trigger zapisze fałszywą zmianę ceny.
+        key = (item.get('sku'), item.get('store'))
+        saved = self.offers.get(key)
 
-        # Gdy bufor ma >= 100 sztuk, ładujemy paczkę do bazy
-        if len(self.items_buffer) >= self.batch_size:
-            self._flush_buffer(spider)
+        if saved is None:
+            self.offers[key] = tuple_data
+        else:
+            self.duplicate_skus.add(key)
+            if offer_price(tuple_data) < offer_price(saved):
+                self.offers[key] = tuple_data
 
         return item
 
-    def _flush_buffer(self, spider):
-        if not self.items_buffer:
+    def _save_offers(self, spider):
+        # Dopisany first_seen; nie ma go w ON CONFLICT DO UPDATE, więc się nie zmienia.
+        rows = [row + (row[10],) for row in self.offers.values()]
+        if not rows:
             return
 
         # Używamy UPSERT: Wstawiamy nowy produkt LUB aktualizujemy jeśli SKU już istnieje.
@@ -166,9 +196,9 @@ class SaveToPostgresSQLPipeline:
             INSERT INTO {self.table_name} (
                 sku, name, size, color, manufacturer, category,
                 price_normal, price_special, store, availability,
-                date_of_download, url, image, description
+                date_of_download, url, image, description, first_seen
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (sku, store) DO UPDATE SET
                 name = COALESCE(EXCLUDED.name, {self.table_name}.name),
@@ -196,19 +226,34 @@ class SaveToPostgresSQLPipeline:
                     {self.table_name}.description
                 );
         """
-        try:
-            psycopg2.extras.execute_batch(self.cur, query, self.items_buffer)
-            self.conn.commit()
-            spider.logger.debug(f"[DATABASE] Wrzucono paczkę: {len(self.items_buffer)} produktów.")
-        except Exception as e:
-            self.conn.rollback()
-            spider.logger.error(f"[DATABASE ERROR] Błąd zapisu paczki: {e}")
-        finally:
-            self.items_buffer.clear()
+        saved_count = 0
+
+        for start in range(0, len(rows), self.batch_size):
+            batch = rows[start:start + self.batch_size]
+            try:
+                psycopg2.extras.execute_batch(self.cur, query, batch)
+                self.conn.commit()
+                saved_count += len(batch)
+            except Exception as e:
+                self.conn.rollback()
+                spider.logger.error(f"[DATABASE ERROR] Błąd zapisu paczki: {e}")
+
+        spider.logger.info(
+            f"[DATABASE] Zapisano {saved_count} z {len(rows)} ofert w tabeli {self.table_name}."
+        )
 
     def close_spider(self, spider):
-        self._flush_buffer(spider)
-        self.cur.close()
-        self.conn.close()
+        try:
+            self._save_offers(spider)
+
+            if self.duplicate_skus:
+                examples = ", ".join(sorted(sku for sku, _ in self.duplicate_skus)[:5])
+                spider.logger.warning(
+                    f"[DATABASE] Ten sam SKU w kilku ofertach: {len(self.duplicate_skus)} "
+                    f"(zapisano ofertę z najniższą ceną), np. {examples}"
+                )
+        finally:
+            self.cur.close()
+            self.conn.close()
 
 

@@ -206,6 +206,8 @@ class MultiTenantReportGenerator:
         record[f"{store}_price_special"] = comp_item.get("price_special")
         record[f"{store}_url"] = comp_item["url"]
         record[f"{store}_name"] = comp_item["name"]
+        # SKU oferty do historii cen (rozmiary mają zwykle wspólny adres).
+        record[f"{store}_sku"] = comp_item.get("sku")
 
     def match_products(self, client_df, comp_df, name_threshold, color_threshold, maker_threshold):
         """Dla każdego produktu klienta najlepsza oferta tego samego rozmiaru w każdym sklepie."""
@@ -272,6 +274,7 @@ class MultiTenantReportGenerator:
                 base_record[f"{comp_store}_price_special"] = None
                 base_record[f"{comp_store}_url"] = None
                 base_record[f"{comp_store}_name"] = None
+                base_record[f"{comp_store}_sku"] = None
 
             candidates = comp_df[
                 comp_df["block_size"] == client_item["block_size"]

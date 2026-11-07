@@ -33,3 +33,4 @@ storage/file_folder/*
 ecommerce_price_comparer/spiders/**/*.txt
 ecommerce_price_comparer/spiders/calvado_com/
 /Praca dyplomowa/
+/CLAUDE.md
