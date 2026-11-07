@@ -10,6 +10,7 @@ from datetime import datetime
 from ecommerce_price_comparer.utilities.data_utility import DataCleaner
 from ecommerce_price_comparer.items import ProductData
 from ecommerce_price_comparer.utilities.url_safety import safe_get
+from processors.client_size_prices import apply_size_price, load_size_prices
 load_dotenv()
 
 class DataExtractor:
@@ -109,6 +110,7 @@ class DataLoader:
         )
         self.cur = self.conn.cursor()
         self._create_table()
+        self.size_prices = load_size_prices(self.cur, self.table_name)
 
     def _create_table(self):
         query = f"""
@@ -140,9 +142,13 @@ class DataLoader:
             print(f"Rozpoczynam czyszczenie i zapis do tabeli...")
             batch = []
             total_processed = 0
+            size_price_status = {"applied": 0, "stale": 0}
 
             for raw_item in data_stream:
                 cleaned_item = self.apply_data_cleaner(raw_item)
+                status = apply_size_price(cleaned_item, self.size_prices)
+                if status:
+                    size_price_status[status] += 1
 
                 if cleaned_item.get('sku'):
                     tuple_data = (
@@ -162,6 +168,11 @@ class DataLoader:
                 self._save_batch(batch)
 
             print(f"Zakończono! Zapisano łącznie {total_processed} produktów.")
+            if self.size_prices:
+                print(
+                    f"[INGEST] Ceny rozmiarów ze strony sklepu: zastosowane {size_price_status['applied']}, "
+                    f"pominięte {size_price_status['stale']} (cena w feedzie zmieniła się od pobrania)"
+                )
 
         finally:
             # Zawsze zamykaj po zakończeniu pracy
