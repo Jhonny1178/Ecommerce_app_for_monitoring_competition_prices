@@ -2,22 +2,40 @@ import re
 junk_phrases = ['pościel utrzymana w', 'tonacji', 'tonacja', 'z pięknym subtelnym połyskiem', 'delikatna',
                         'pościel utrzymana jest w','naturalna', 'odcienie']
 color_map = {
-    'niebieski': ['niebieski', 'turkus', 'turquesa', 'azul', 'denim', 'morski', 'blue', 'sky'],
-    'szary': ['szary', 'szarości', 'antracyt', 'anthracit', 'silver', 'srebrny', 'grey', 'gray', 'plata',
-              'grafit','szarej'],
-    'beżowy': ['beż', 'beżu', 'natural', 'crudo', 'piaskowy', 'sand', 'taupe', 'oat', 'linen', 'cream',
-               'kremowy','kremowej'],
-    'biały': ['biały', 'bieli', 'white', 'blanco', 'ivory','białej'],
-    'czarny': ['czarny', 'czerni', 'black', 'negro','czarnej'],
-    'zielony': ['zielony', 'zieleni', 'green', 'verde', 'oliwka', 'olive', 'bottle','zielonej'],
-    'żółty': ['żółty', 'żółtego', 'yellow', 'gold', 'oro', 'mostaza', 'ginkgo','żółtej'],
-    'czerwony': ['czerwony', 'czerwieni', 'red', 'rojo', 'terracota','czerwonej'],
-    'różowy': ['różowy', 'różu', 'rose', 'pink', 'nude', 'caldera','różowej'],
-    'fioletowy': ['fiolet', 'fioletu', 'lila', 'lilac', 'violet', 'purple','fioletowej'],
-    'brązowy': ['brąz', 'brązu', 'brown', 'marron', 'caffe', 'chocolate','brązowej'],
-    'wielokolorowy': ['wielokolorowy', 'multicolor', 'mix','wielokolorowej'],
-    'bordowy' : ['bordowa','bordowej']
-        }
+    'niebieski': ['niebiesk', 'błękit', 'granat', 'navy', 'turkus', 'turquesa', 'azul', 'denim', 'morsk',
+                  'blue', 'sky', 'blau'],
+    'szary': ['szar', 'antracyt', 'anthracit', 'silver', 'srebr', 'popiel', 'grey', 'gray', 'plata', 'grafit',
+              'grau', 'antrazit', 'anthrazit'],
+    'beżowy': ['beż', 'beige', 'natur', 'crudo', 'piask', 'sand', 'taupe', 'oat', 'linen', 'cream', 'krem'],
+    'biały': ['biał', 'biel', 'white', 'weiss', 'blanco', 'ivory'],
+    'czarny': ['czarn', 'czerń', 'czerni', 'black', 'schwarz', 'negro'],
+    'zielony': ['ziel', 'green', 'grün', 'mint', 'verde', 'oliwk', 'olive', 'bottle'],
+    'żółty': ['żółt', 'yellow', 'mostaza', 'musztard', 'ginkgo'],
+    'czerwony': ['czerw', 'red', 'rojo', 'terracota'],
+    'różowy': ['róż', 'rose', 'rosa', 'pink', 'nude', 'caldera'],
+    'fioletowy': ['fiolet', 'lila', 'lilac', 'violet', 'purple'],
+    'brązowy': ['brąz', 'brown', 'braun', 'marron', 'caffe', 'chocolate'],
+    'złoty': ['złot', 'gold', 'oro'],
+    'pomarańczowy': ['pomarańcz', 'orange', 'naranja'],
+    'wielokolorowy': ['wielokolor', 'wielobarwn', 'różn', 'kolorow', 'multicolor', 'multikolor', 'mix'],
+    'bordowy': ['bordo'],
+}
+MULTICOLOR_WORD_STARTS = tuple(color_map['wielokolorowy'])
+SHADE_WORD_PREFIXES = ('ciemno', 'jasno')
+_COLOR_WORD_PATTERN = re.compile(r"[^\W\d_]+")
+
+
+def color_words(color):
+    """Słowa opisu koloru bez przedrostków odcienia ("ciemnoszara" -> "szara")."""
+    words = []
+    for word in _COLOR_WORD_PATTERN.findall(color.lower()):
+        if word.startswith(MULTICOLOR_WORD_STARTS):
+            word = 'wielokolorowy'
+        for prefix in SHADE_WORD_PREFIXES:
+            if word.startswith(prefix) and len(word) - len(prefix) >= 3:
+                word = word[len(prefix):]
+        words.append(word)
+    return words
 size_map = {
     'mała': 'S',
     'średnia': 'M',
@@ -90,8 +108,9 @@ class DataCleaner:
             for phrase in junk_phrases:
                 color = color.replace(phrase, "")
                 color = color.strip()
+            words = color_words(color)
             for standard, keywords in color_map.items():
-                if any(word in color for word in keywords):
+                if any(word.startswith(keyword) for word in words for keyword in keywords):
                     return standard
             return color
     @staticmethod

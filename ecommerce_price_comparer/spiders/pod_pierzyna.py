@@ -1,8 +1,29 @@
 import scrapy
 import re
-import json
 from ecommerce_price_comparer.items import ProductData
+from ecommerce_price_comparer.utilities.brands import brand_matches, parse_brands
+from ecommerce_price_comparer.utilities.idosell import idosell_sizes, size_prices
+from ecommerce_price_comparer.utilities.jsonld import (
+    breadcrumb_name,
+    find_jsonld_node,
+    jsonld_first_url,
+    jsonld_offers,
+    jsonld_text,
+)
 from datetime import datetime
+
+PRODUCERS_URL = "https://podpierzyna.com/producers.php"
+_COUNTER_PATTERN = re.compile(r"([?&]counter=)(\d+)")
+
+
+def next_page_url(url):
+    """Następna strona listy: zmienia tylko parametr counter."""
+    match = _COUNTER_PATTERN.search(url)
+    if match:
+        page = int(match.group(2)) + 1
+        return f"{url[:match.start()]}{match.group(1)}{page}{url[match.end():]}"
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}counter=1"
 
 
 class PodPierzynaSpider(scrapy.Spider):
@@ -18,115 +39,82 @@ class PodPierzynaSpider(scrapy.Spider):
                     "https://podpierzyna.com/do-kuchni-jadalni/",
                     "https://podpierzyna.com/premium/"]
 
+    def __init__(self, *args, brands=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.brands = parse_brands(brands)
+
+    def initial_requests(self):
+        if self.brands:
+            return [scrapy.Request(PRODUCERS_URL, callback=self.parse_producers, dont_filter=True)]
+        return [scrapy.Request(url, dont_filter=True) for url in self.start_urls]
+
+    async def start(self):
+        for request in self.initial_requests():
+            yield request
+
+    def parse_producers(self, response):
+        matched = []
+        for link in response.css("a.producers__icon"):
+            title = (link.attrib.get("title") or " ".join(link.css("::text").getall())).strip()
+            href = link.attrib.get("href")
+            if href and title and brand_matches(title, self.brands) and href not in matched:
+                matched.append(href)
+                self.logger.info("Marka klienta w sklepie: %s", title)
+
+        if not matched:
+            self.logger.warning(
+                "Na liście marek %s nie ma marek klienta; pobieram dział sypialni", response.url
+            )
+            for url in self.start_urls:
+                yield response.follow(url, callback=self.parse, dont_filter=True)
+            return
+
+        self.logger.info("Pobieram tylko marki klienta: %d z %d", len(matched), len(self.brands))
+        for href in matched:
+            yield response.follow(href, callback=self.get_product_links)
+
     def parse(self, response):
         category_links = response.css('div.core-navigation_items  a::attr(href)').getall()
         for link in category_links:
             yield response.follow(link, callback=self.get_product_links)
 
     def get_product_links(self, response):
-        pattern = r'[^=]+$'
         page_links = response.css('section.search.products div.col-6 a.product__icon::attr(href)').getall()
-        current_link = response.url
-        match = re.search(pattern, current_link)
-        if match:
-            number = match.group(0)
-            if not number.isdigit():
-                number = None
-        else:
-            number = None
         if page_links:
             yield from response.follow_all(page_links, callback=self.get_data_from_links)
-            if number:
-                new_current_link = current_link.replace(str(number), str(int(number)+1))
-                yield response.follow(new_current_link, callback=self.get_product_links)
+            yield response.follow(next_page_url(response.url), callback=self.get_product_links)
 
-            else:
-                new_current_link = current_link + "?counter=1"
-                yield response.follow(new_current_link, callback=self.get_product_links)
     def get_data_from_links(self, response):
-        sizes_and_info = {}
         category = None
-        final_json = None
-        price_special = None
-        price_old = None
-        availability = None
-        url = None
         raw_json = response.css('script[type="application/ld+json"]::text').getall()
         color = response.xpath('//text()[contains(., "Dominujący kolor")]/following::text()[1]').get()
-        ajax_list = response.css('script.ajaxLoad::text').getall()
-        for ajax_item in ajax_list:
-            if "cena_raty" in ajax_item:
-                match = re.search( r'\{(.*)\}', ajax_item, re.DOTALL)
-                if match:
-                    ajax = json.loads(match.group(0).replace("\'","\""))
-                    sizes_and_info =  ajax["sizes"]
-        if raw_json:
-            final_json = raw_json
-            for product in raw_json:
-                product = json.loads(product)
-                if product['@type'] == "Product":
-                    final_json = product
-                if product['@type'] == "BreadcrumbList":
-                    json_temp = product["itemListElement"]
+        sizes_and_info = idosell_sizes(
+            response.css('script.ajaxLoad::text').getall(), self.logger, response.url
+        )
 
-                    for dictionary in json_temp:
-                        if dictionary["position"]==2:
-                            category = dictionary["name"]
+        final_json = find_jsonld_node(raw_json, "Product")
+        if not final_json:
+            self.logger.warning("Brak danych produktu (JSON-LD Product) na stronie %s", response.url)
+            return
+
+        breadcrumb = find_jsonld_node(raw_json, "BreadcrumbList") or {}
+        for element in breadcrumb.get("itemListElement") or []:
+            if isinstance(element, dict) and element.get("position") == 2:
+                category = breadcrumb_name(element)
+
+        offers = [offer for offer in jsonld_offers(final_json) if offer.get('@type') == "Offer"]
+        availability = offers[0].get('availability') if offers else None
+        url = (offers[0].get('url') if offers else None) or response.url
+        name = jsonld_text(final_json.get("name"))
+        description = final_json.get('description')
+        brand = jsonld_text(final_json.get("brand"))
+        image = jsonld_first_url(final_json.get("image"))
+
         for key, prices in sizes_and_info.items():
-            size = prices['description']
-            price_special = prices['price']['value']
+            size = prices.get('description') or None
+            price_old, price_special = size_prices(prices)
 
-            if 'normalprice' in prices['price']:
-                price_old = prices['price']['normalprice']
-            else:
-                price_old = price_special
-                price_special = None
-
-            if 'code_extern' in prices:
-                sku = prices['code_extern']
-            else:
-                sku = None
-            if color:
-                color = color
-            else:
-                color = None
-            if size:
-                size = size
-            else:
-                size = None
-            if 'name' in final_json:
-                name = final_json["name"]
-            else:
-                name = None
-            if  'description' in final_json:
-                description = final_json['description']
-            else:
-                description = None
-            if 'brand' in final_json:
-                if 'name' in final_json["brand"]:
-                    brand = final_json["brand"]["name"]
-                else:
-                    brand = None
-            else:
-                brand = None
-
-            if 'offers' in final_json:
-                for offer in final_json["offers"]:
-                    if offer['@type'] == "Offer":
-                        if 'url' in offer:
-                            url = offer['url']
-                        else:
-                            url = None
-                        if 'availability' in offer:
-                            availability = offer['availability']
-                        else:
-                            availability = None
-
-
-            if 'image' in final_json:
-                image = final_json["image"]
-            else:
-                image = None
+            sku = prices.get('code_extern')
 
             product_data = ProductData()
             product_data['color'] = color
