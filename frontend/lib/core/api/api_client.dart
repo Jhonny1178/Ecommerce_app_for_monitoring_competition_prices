@@ -74,9 +74,11 @@ class ApiClient {
     });
   }
 
+  // redirectOnUnauthorized: false — 401 nie przenosi do logowania (np. sprawdzanie sesji na starcie).
   static Future<http.Response> get(
     Uri url, {
     Map<String, String>? headers,
+    bool redirectOnUnauthorized = true,
   }) async {
     final absoluteUrl = _buildUri(url);
 
@@ -85,7 +87,7 @@ class ApiClient {
       headers: headers,
     );
 
-    if (response.statusCode == 401) {
+    if (response.statusCode == 401 && redirectOnUnauthorized) {
       _handleUnauthorized();
     }
 

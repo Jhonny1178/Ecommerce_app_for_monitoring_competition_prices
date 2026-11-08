@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'core/theme/theme.dart';
-import 'features/auth/screens/landing_page_screen.dart';
+import 'features/auth/screens/session_gate_screen.dart';
 import 'core/api/api_client.dart';
+import 'core/widgets/selectable_text_theme.dart';
 
 final ValueNotifier<ThemeMode> globalThemeNotifier = ValueNotifier(ThemeMode.light);
 
@@ -23,10 +24,9 @@ class MyApp extends StatelessWidget {
           title: 'e-ROCH App',
           
           themeMode: currentMode,
-          theme: AppTheme.lightTheme,
-          darkTheme: AppTheme.darkTheme, 
-          
-          home: const LandingPageScreen(),
+          theme: withSelectableText(AppTheme.lightTheme),
+          darkTheme: withSelectableText(AppTheme.darkTheme),
+          home: const SessionGateScreen(),
         );
       },
     );
