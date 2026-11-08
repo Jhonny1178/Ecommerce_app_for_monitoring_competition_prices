@@ -38,11 +38,11 @@ void main() {
         headers: {'content-type': 'application/json; charset=utf-8'},
       );
 
-  http.Response filtersResponse() => http.Response(
+  http.Response filtersResponse({List<String> brands = const []}) => http.Response(
         jsonEncode({
           'ok': true,
           'categories': [],
-          'brands': [],
+          'brands': brands,
           'stores': [],
           'max_stores': 5,
         }),
@@ -164,8 +164,8 @@ void main() {
       await pumpProductsList(tester);
       await tester.pumpAndSettle();
 
-      expect(find.text('calavado: 189.00 zł (+164.00 zł, +656.0%)'), findsOneWidget);
-      expect(find.text('pod_pierzyna: 20.50 zł (-4.50 zł, -18.0%)'), findsOneWidget);
+      expect(find.text('calavado: 189.00 zł (164.00 zł drożej)'), findsOneWidget);
+      expect(find.text('pod_pierzyna: 20.50 zł (4.50 zł taniej)'), findsOneWidget);
     });
 
     testWidgets('wysyła kierunek i wielkość różnicy do API', (tester) async {
@@ -181,7 +181,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('price_diff_dropdown')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Konkurencja tańsza').last);
+      await tester.tap(find.text('tańsza').last);
       await tester.pumpAndSettle();
 
       expect(requested.last.queryParameters['price_diff'], 'lower');
@@ -224,6 +224,8 @@ void main() {
           'max_price': 159.0,
           'min_diff_pct': -4.0,
           'max_diff_pct': 12.5,
+          'min_diff': -1.0,
+          'max_diff': 19.9,
         };
 
     testWidgets('jeden kafelek na produkt z liczbą wariantów', (tester) async {
@@ -238,7 +240,7 @@ void main() {
       expect(find.text('ręcznik vegan life'), findsOneWidget);
       expect(find.text('5 wariantów'), findsOneWidget);
       expect(find.text('25.00 – 159.00 zł'), findsOneWidget);
-      expect(find.text('Konkurencja: od -4.0% do +12.5%'), findsOneWidget);
+      expect(find.text('Konkurencja: od 1.00 zł taniej do 19.90 zł drożej'), findsOneWidget);
     });
 
     testWidgets('przy filtrze kafelek mówi, ile wariantów go spełnia, a klik otwiera warianty', (tester) async {
@@ -259,7 +261,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('price_diff_dropdown')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Konkurencja tańsza').last);
+      await tester.tap(find.text('tańsza').last);
       await tester.pumpAndSettle();
 
       expect(find.text('Filtry spełnia: 2 z 5 wariantów'), findsOneWidget);
@@ -308,7 +310,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('sort_dropdown')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Największa różnica (zł)').last);
+      await tester.tap(find.text('Największa różnica ceny').last);
       await tester.pumpAndSettle();
 
       expect(requested.last.queryParameters['sort'], 'diff_pln');
@@ -316,11 +318,207 @@ void main() {
     });
   });
 
-  test('odmiana słowa "wariant"', () {
+  group('czytelne filtry i sortowanie', () {
+    late List<Uri> requested;
+
+    void mockApi({int totalItems = 0}) {
+      requested = [];
+      ApiClient.setClient(MockClient((request) async {
+        if (request.url.path == '/api/filters') return filtersResponse(brands: ['Hefel', 'Vossen']);
+        requested.add(request.url);
+        return http.Response(
+          jsonEncode({
+            'ok': true,
+            'data': [],
+            'pagination': {'total_pages': 1, 'total_items': totalItems},
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }));
+    }
+
+    Future<void> pumpWide(WidgetTester tester, {bool matchedOnly = true}) async {
+      tester.view.physicalSize = const Size(1920, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await pumpProductsList(tester, matchedOnly: matchedOnly);
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('pole ceny filtruje samo po chwili, bez Enter', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+      final before = requested.length;
+
+      await tester.enterText(find.byKey(const Key('price_min_field')), '100');
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(requested.length, before, reason: 'w trakcie pisania jeszcze bez zapytania');
+
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters['price_min'], '100');
+      expect(find.text('Twoja cena: od 100 zł'), findsOneWidget);
+    });
+
+    testWidgets('niedokończony wpis nie trafia do zapytania', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+
+      await tester.enterText(find.byKey(const Key('diff_min_field')), 'abc');
+      await tester.pump(const Duration(milliseconds: 800));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters.containsKey('diff_min'), isFalse);
+    });
+
+    testWidgets('lista pokazuje nazwę filtra po wyborze, a znacznik ✕ go usuwa', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+      expect(find.text('Marka: wszystkie'), findsOneWidget);
+
+      await tester.tap(find.text('Marka: wszystkie'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hefel').last);
+      await tester.pumpAndSettle();
+
+      expect(requested.last.queryParameters['brand'], 'Hefel');
+      expect(find.text('Marka: Hefel'), findsNWidgets(2), reason: 'przycisk listy i znacznik aktywnego filtra');
+
+      await tester.tap(find.descendant(of: find.byType(InputChip), matching: find.byIcon(Icons.close)));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters.containsKey('brand'), isFalse);
+      expect(find.text('Marka: wszystkie'), findsOneWidget);
+    });
+
+    testWidgets('licznik sklepów z ofertą: + i −, bez górnego limitu', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+      expect(find.text('Sklepy z ofertą: dowolnie'), findsOneWidget);
+      expect(tester.widget<IconButton>(find.byKey(const Key('min_stores_minus'))).onPressed, isNull);
+
+      for (var i = 0; i < 6; i++) {
+        await tester.tap(find.byKey(const Key('min_stores_plus')));
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Text>(find.byKey(const Key('min_stores_label'))).data, 'Sklepy z ofertą: min. 6');
+      expect(requested.last.queryParameters['min_matches'], '6');
+
+      await tester.tap(find.byKey(const Key('min_stores_minus')));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters['min_matches'], '5');
+    });
+
+    testWidgets('licznika sklepów i podejrzanych dopasowań nie ma na liście wszystkich produktów', (tester) async {
+      mockApi();
+      await pumpWide(tester, matchedOnly: false);
+      expect(find.byKey(const Key('min_stores_stepper')), findsNothing);
+      expect(find.byKey(const Key('high_risk_filter')), findsNothing);
+    });
+
+    testWidgets('przełącznik "Podejrzane dopasowania" wysyła risk=high i dodaje znacznik', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+      expect(requested.last.queryParameters.containsKey('risk'), isFalse);
+
+      await tester.tap(find.byKey(const Key('high_risk_filter')));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters['risk'], 'high');
+      expect(find.text('Podejrzane dopasowania (różnica ponad 50%)'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('clear_filters')));
+      await tester.pumpAndSettle();
+      expect(requested.last.queryParameters.containsKey('risk'), isFalse);
+    });
+
+    testWidgets('otwarcie z Dashboardu od razu filtruje podejrzane dopasowania', (tester) async {
+      mockApi();
+      tester.view.physicalSize = const Size(1920, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(body: ProductsListScreen(matchedOnly: true, initialHighRisk: true)),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(requested.first.queryParameters['risk'], 'high');
+      expect(tester.widget<FilterChip>(find.byKey(const Key('high_risk_filter'))).selected, isTrue);
+    });
+
+    testWidgets('pokazuje liczbę wyników', (tester) async {
+      mockApi(totalItems: 128);
+      await pumpWide(tester);
+      expect(find.text('Znaleziono 128 produktów'), findsOneWidget);
+    });
+
+    testWidgets('"Wyczyść filtry" zostawia sortowanie i wyszukiwanie', (tester) async {
+      mockApi();
+      await pumpWide(tester);
+
+      await tester.enterText(find.byType(TextField).first, 'kołdra');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('sort_dropdown')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Nazwa A–Z').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('min_stores_plus')));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('clear_filters')));
+      await tester.pumpAndSettle();
+
+      final query = requested.last.queryParameters;
+      expect(query.containsKey('min_matches'), isFalse);
+      expect(query['sort'], 'name');
+      expect(query['search'], 'kołdra');
+      expect(find.byKey(const Key('clear_filters')), findsNothing);
+    });
+  });
+
+  test('odmiana słów "wariant" i "produkt"', () {
     expect(variantsLabel(1), '1 wariant');
     expect(variantsLabel(3), '3 warianty');
     expect(variantsLabel(5), '5 wariantów');
     expect(variantsLabel(12), '12 wariantów');
     expect(variantsLabel(22), '22 warianty');
+    expect(productsLabel(0), '0 produktów');
+    expect(productsLabel(1), '1 produkt');
+    expect(productsLabel(4), '4 produkty');
+    expect(productsLabel(128), '128 produktów');
+  });
+
+  test('różnica ceny słowami, bez procentów', () {
+    expect(differenceLabel(164), '164.00 zł drożej');
+    expect(differenceLabel(-4.5), '4.50 zł taniej');
+    expect(differenceLabel(0), 'ta sama cena');
+
+    expect(groupDifferenceLabel(-12.5, -4), 'Konkurencja taniej o 4.00–12.50 zł');
+    expect(groupDifferenceLabel(3, 9), 'Konkurencja drożej o 3.00–9.00 zł');
+    expect(groupDifferenceLabel(-7, -7), 'Konkurencja taniej o 7.00 zł');
+    expect(groupDifferenceLabel(-1, 19.9), 'Konkurencja: od 1.00 zł taniej do 19.90 zł drożej');
+    expect(groupDifferenceLabel(0, 0), 'Konkurencja: ta sama cena');
+  });
+
+  testWidgets('filtr różnicy nie ma już przełącznika zł / %', (tester) async {
+    ApiClient.setClient(MockClient((request) async {
+      if (request.url.path == '/api/filters') return filtersResponse();
+      return productsResponse([]);
+    }));
+    tester.view.physicalSize = const Size(1920, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await pumpProductsList(tester, matchedOnly: true);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('diff_unit_dropdown')), findsNothing);
+    await tester.tap(find.byKey(const Key('sort_dropdown')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('(%)'), findsNothing);
   });
 }

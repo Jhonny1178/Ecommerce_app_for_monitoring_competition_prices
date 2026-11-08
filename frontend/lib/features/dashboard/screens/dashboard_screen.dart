@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -11,6 +12,7 @@ import '../../auth/screens/file_upload_screen.dart';
 import '../../auth/screens/subscription_screen.dart';
 import '../../auth/screens/auth_router.dart';
 import '../../auth/screens/reset_password_screen.dart';
+import '../widgets/analytics_section.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -22,7 +24,8 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   bool _isFabExpanded = false;
   int _selectedTabIndex = 0;
-  bool _isLoadingStats = true;
+  // Przejście z komunikatu na Dashboardzie: "Zmatchowane produkty" od razu z filtrem podejrzanych dopasowań.
+  bool _highRiskPreset = false;
   bool _isCheckingUserStatus = true;
   final TextEditingController _currentPasswordController = TextEditingController();
   final TextEditingController _newPasswordController = TextEditingController();
@@ -31,14 +34,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _newPasswordError;
   String? _repeatPasswordError;
   bool _isChangingPassword = false;
-  Map<String, dynamic> _stats = {};
   int _refreshCounter = 0;
+  Timer? _dataVersionTimer;
+  String? _dataVersion;
+  bool _dataVersionLoaded = false;
+  bool _newDataAvailable = false;
 
   @override
   void initState() {
     super.initState();
     _checkUserStatus();
-    _fetchStats();
+    _checkDataVersion();
+    _dataVersionTimer = Timer.periodic(const Duration(minutes: 2), (_) => _checkDataVersion());
+  }
+
+  @override
+  void dispose() {
+    _dataVersionTimer?.cancel();
+    super.dispose();
+  }
+
+  // Pierwsze wywołanie zapamiętuje wersję danych, kolejne pokazują pasek, gdy pipeline skończył nowy przebieg.
+  Future<void> _checkDataVersion() async {
+    try {
+      final response = await ApiClient.get(
+        Uri.parse('/api/data_version'),
+        headers: {'Accept': 'application/json'},
+      );
+      if (response.statusCode != 200) return;
+
+      final data = jsonDecode(response.body);
+      if (data is! Map || data['ok'] != true || !mounted) return;
+
+      final version = data['last_update']?.toString();
+      if (!_dataVersionLoaded) {
+        _dataVersion = version;
+        _dataVersionLoaded = true;
+      } else if (version != _dataVersion && !_newDataAvailable) {
+        setState(() => _newDataAvailable = true);
+      }
+    } catch (e) {
+      debugPrint('Błąd sprawdzania nowych danych: $e');
+    }
+  }
+
+  // Ukrywa pasek i przyjmuje bieżącą wersję danych jako widzianą.
+  void _acceptDataVersion() {
+    setState(() => _newDataAvailable = false);
+    _dataVersionLoaded = false;
+    _checkDataVersion();
   }
 
   Future<void> _checkUserStatus() async {
@@ -108,40 +152,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  // Nowy _refreshCounter przebudowuje zakładki (w tym statystyki), więc pobierają dane od nowa.
   void _refreshData() {
-    setState(() {
-      _isLoadingStats = true;
-      _refreshCounter++;
-    });
-    _fetchStats();
+    setState(() => _refreshCounter++);
+    _acceptDataVersion();
     _checkUserStatus();
   }
 
-  Future<void> _fetchStats() async {
-    try {
-      final response = await ApiClient.get(
-        Uri.parse('/api/stats'),
-        headers: {'Accept': 'application/json'},
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-
-        if (data['ok'] == true) {
-          if (mounted) {
-            setState(() {
-              _stats = data['summary'] ?? {};
-            });
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('Błąd pobierania statystyk: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingStats = false);
-      }
-    }
+  void _showRiskyMatches() {
+    setState(() {
+      _highRiskPreset = true;
+      _selectedTabIndex = 1;
+    });
   }
 
   Future<void> _openProfileOrOnboarding() async {
@@ -256,7 +278,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                           ),
                                         );
                                         if (changed == true) {
-                                          _fetchStats();
+                                          setState(() => _refreshCounter++);
                                           _openProfileOrOnboarding();
                                         }
                                       },
@@ -477,6 +499,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: Column(
           children: [
             _buildHeader(colorScheme),
+            if (_newDataAvailable) _buildNewDataBanner(colorScheme),
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(32),
@@ -486,13 +509,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     _buildCustomTabBar(colorScheme),
                     const SizedBox(height: 32),
                     if (_selectedTabIndex == 0) ...[
-                      _isLoadingStats
-                          ? const Center(child: CircularProgressIndicator())
-                          : _buildKpiSection(colorScheme),
+                      AnalyticsSection(
+                        key: ValueKey('analytics_$_refreshCounter'),
+                        onShowRiskyMatches: _showRiskyMatches,
+                      ),
                     ] else if (_selectedTabIndex == 1) ...[
                       SizedBox(
                         height: 800,
-                        child: ProductsListScreen(key: ValueKey('matched_$_refreshCounter'), matchedOnly: true),
+                        child: ProductsListScreen(
+                          key: ValueKey('matched_${_refreshCounter}_$_highRiskPreset'),
+                          matchedOnly: true,
+                          initialHighRisk: _highRiskPreset,
+                        ),
                       ),
                     ] else if (_selectedTabIndex == 2) ...[
                       SizedBox(
@@ -511,6 +539,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildNewDataBanner(ColorScheme colorScheme) {
+    return Container(
+      width: double.infinity,
+      color: colorScheme.primaryContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 8),
+      child: Row(
+        children: [
+          Icon(Icons.update, color: colorScheme.onPrimaryContainer),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Są nowe dane: zakończyła się aktualizacja cen.',
+              style: TextStyle(color: colorScheme.onPrimaryContainer),
+            ),
+          ),
+          FilledButton(
+            onPressed: _refreshData,
+            child: const Text('Odśwież dane'),
+          ),
+          IconButton(
+            tooltip: 'Ukryj',
+            icon: Icon(Icons.close, color: colorScheme.onPrimaryContainer),
+            onPressed: _acceptDataVersion,
+          ),
+        ],
       ),
     );
   }
@@ -629,7 +686,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final isSelected = _selectedTabIndex == index;
 
     return InkWell(
-      onTap: () => setState(() => _selectedTabIndex = index),
+      // Ręczny wybór zakładki = zwykła lista, bez filtra ustawionego z Dashboardu.
+      onTap: () => setState(() {
+        _selectedTabIndex = index;
+        _highRiskPreset = false;
+      }),
       borderRadius: BorderRadius.circular(20),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
@@ -646,422 +707,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 : colorScheme.onSurfaceVariant,
           ),
         ),
-      ),
-    );
-  }
-
-   int _asInt(dynamic value) {
-    if (value == null) return 0;
-    if (value is int) return value;
-    if (value is num) return value.round();
-    return int.tryParse(value.toString()) ?? 0;
-  }
-
-  num? _asNum(dynamic value) {
-    if (value == null) return null;
-    if (value is num) return value;
-    return num.tryParse(value.toString());
-  }
-
-  String _formatNumber(dynamic value) {
-    final number = _asInt(value);
-    return number.toString();
-  }
-
-  String _formatMoney(dynamic value) {
-    final number = _asNum(value);
-
-    if (number == null) {
-      return 'Brak danych';
-    }
-
-    return '${number.toStringAsFixed(2)} zł';
-  }
-
-  String _formatSignedMoney(dynamic value) {
-    final number = _asNum(value);
-
-    if (number == null) {
-      return 'Brak danych';
-    }
-
-    if (number > 0) {
-      return '+${number.toStringAsFixed(2)} zł';
-    }
-
-    if (number < 0) {
-      return '${number.toStringAsFixed(2)} zł';
-    }
-
-    return '0.00 zł';
-  }
-
-  Widget _buildKpiSection(ColorScheme colorScheme) {
-    final matchedProducts = _asInt(_stats['matched_products'] ?? _stats['total']);
-    final totalCompetitorMatches = _asInt(_stats['total_competitor_matches']);
-    final totalStores = _asInt(_stats['total_stores']);
-    final totalClientProducts = _asInt(_stats['total_client_products']);
-    final totalCompetitorProducts = _asInt(_stats['total_competitor_products']);
-    final ourCheaper = _asInt(_stats['our_price_lower_count']);
-    final ourMoreExpensive = _asInt(_stats['our_price_higher_count']);
-    final samePrice = _asInt(_stats['same_price_count']);
-    final avgClientPrice = _formatMoney(_stats['avg_client_price']);
-    final avgCompetitorPrice = _formatMoney(_stats['avg_competitor_price']);
-    final avgDiff = _formatSignedMoney(_stats['avg_difference_competitor_minus_ours']);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _buildBigKpiCard(
-                title: 'Zmatchowane produkty',
-                value: _formatNumber(matchedProducts),
-                subtitle: 'produkty z realnym dopasowaniem',
-                icon: Icons.link,
-                colorScheme: colorScheme,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildBigKpiCard(
-                title: 'Monitorowane sklepy',
-                value: _formatNumber(totalStores),
-                subtitle: 'aktywni konkurenci',
-                icon: Icons.storefront,
-                colorScheme: colorScheme,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: _buildBigKpiCard(
-                title: 'Średnia cena rynku',
-                value: avgCompetitorPrice,
-                subtitle: 'średnia cena konkurencji',
-                icon: Icons.payments_outlined,
-                colorScheme: colorScheme,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              flex: 7,
-              child: _buildPricePositionPanel(
-                colorScheme: colorScheme,
-                ourCheaper: ourCheaper,
-                ourMoreExpensive: ourMoreExpensive,
-                samePrice: samePrice,
-                avgDiff: avgDiff,
-              ),
-            ),
-            const SizedBox(width: 20),
-            Expanded(
-              flex: 5,
-              child: _buildMarketSnapshotPanel(
-                colorScheme: colorScheme,
-                totalClientProducts: totalClientProducts,
-                totalCompetitorProducts: totalCompetitorProducts,
-                avgClientPrice: avgClientPrice,
-                avgCompetitorPrice: avgCompetitorPrice,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBigKpiCard({
-    required String title,
-    required String value,
-    required String subtitle,
-    required IconData icon,
-    required ColorScheme colorScheme,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(
-          color: colorScheme.outlineVariant.withOpacity(0.35),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.035),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  style: TextStyle(
-                    color: colorScheme.onSurfaceVariant,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              Icon(icon, color: colorScheme.primary, size: 20),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Text(
-            value,
-            style: TextStyle(
-              color: colorScheme.onSurface,
-              fontSize: 24,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            style: TextStyle(
-              color: colorScheme.onSurfaceVariant.withOpacity(0.8),
-              fontSize: 11,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPricePositionPanel({
-    required ColorScheme colorScheme,
-    required int ourCheaper,
-    required int ourMoreExpensive,
-    required int samePrice,
-    required String avgDiff,
-  }) {
-    final total = ourCheaper + ourMoreExpensive + samePrice;
-
-    double percent(int value) {
-      if (total == 0) return 0;
-      return value / total;
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: colorScheme.outlineVariant.withOpacity(0.35),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // USUNIĘTO IKONĘ
-          const Text(
-            'Pozycja cenowa względem rynku',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Analiza na podstawie tabeli matches: dodatnia różnica oznacza, że konkurencja jest droższa.',
-            style: TextStyle(
-              color: colorScheme.onSurfaceVariant,
-              fontSize: 13,
-            ),
-          ),
-          const SizedBox(height: 24),
-          _buildPriceBar(
-            colorScheme: colorScheme,
-            label: 'Nasza cena niższa',
-            value: ourCheaper,
-            percent: percent(ourCheaper),
-          ),
-          const SizedBox(height: 16),
-          _buildPriceBar(
-            colorScheme: colorScheme,
-            label: 'Nasza cena wyższa',
-            value: ourMoreExpensive,
-            percent: percent(ourMoreExpensive),
-          ),
-          const SizedBox(height: 16),
-          _buildPriceBar(
-            colorScheme: colorScheme,
-            label: 'Cena taka sama',
-            value: samePrice,
-            percent: percent(samePrice),
-          ),
-          const SizedBox(height: 24),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: colorScheme.surface,
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: Row(
-              children: [
-                // USUNIĘTO IKONĘ Z RZĘDU WYNIKOWEGO
-                Text(
-                  'Średnia różnica rynku:',
-                  style: TextStyle(
-                    color: colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  avgDiff,
-                  style: TextStyle(
-                    color: colorScheme.primary,
-                    fontWeight: FontWeight.w900,
-                    fontSize: 20,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ZAKTUALIZOWANA METODA BEZ IKON
-  Widget _buildPriceBar({
-    required ColorScheme colorScheme,
-    required String label,
-    required int value,
-    required double percent,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Text(
-              label,
-              style: const TextStyle(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const Spacer(),
-            Text(
-              value.toString(),
-              style: const TextStyle(
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        ClipRRect(
-          borderRadius: BorderRadius.circular(999),
-          child: LinearProgressIndicator(
-            value: percent.clamp(0.0, 1.0),
-            minHeight: 9,
-            backgroundColor: colorScheme.surface,
-            color: colorScheme.primary,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMarketSnapshotPanel({
-    required ColorScheme colorScheme,
-    required int totalClientProducts,
-    required int totalCompetitorProducts,
-    required String avgClientPrice,
-    required String avgCompetitorPrice,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(24),
-      decoration: BoxDecoration(
-        color: colorScheme.primaryContainer.withOpacity(0.55),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: colorScheme.primary.withOpacity(0.12),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // USUNIĘTO IKONĘ
-          Text(
-            'Szybki obraz rynku',
-            style: TextStyle(
-              color: colorScheme.onPrimaryContainer,
-              fontSize: 20,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 20),
-          _buildSnapshotRow(
-            colorScheme,
-            'Produkty klienta',
-            totalClientProducts.toString(),
-          ),
-          _buildSnapshotRow(
-            colorScheme,
-            'Produkty konkurencji',
-            totalCompetitorProducts.toString(),
-          ),
-          _buildSnapshotRow(
-            colorScheme,
-            'Średnia cena klienta',
-            avgClientPrice,
-          ),
-          _buildSnapshotRow(
-            colorScheme,
-            'Średnia cena konkurencji',
-            avgCompetitorPrice,
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ZAKTUALIZOWANA METODA BEZ IKON
-  Widget _buildSnapshotRow(
-    ColorScheme colorScheme,
-    String label,
-    String value,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: colorScheme.onPrimaryContainer.withOpacity(0.75),
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              color: colorScheme.onPrimaryContainer,
-              fontWeight: FontWeight.w900,
-              fontSize: 15,
-            ),
-          ),
-        ],
       ),
     );
   }

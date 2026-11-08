@@ -13,6 +13,23 @@ String signed(num value, String suffix) {
 
 String price(num? value) => value != null ? "${value.toStringAsFixed(2)} zł" : "-";
 
+/// Różnica oferty słowami (cena konkurencji - cena klienta): "164.00 zł drożej", "4.50 zł taniej".
+String differenceLabel(num difference) {
+  if (difference == 0) return 'ta sama cena';
+  return "${difference.abs().toStringAsFixed(2)} zł ${difference > 0 ? 'drożej' : 'taniej'}";
+}
+
+/// Zakres różnic wariantów kafelka słowami, np. "Konkurencja taniej o 4.00–12.50 zł".
+String groupDifferenceLabel(num minDiff, num maxDiff) {
+  String amount(num value) => value.abs().toStringAsFixed(2);
+  String range(num near, num far) => amount(near) == amount(far) ? amount(far) : "${amount(near)}–${amount(far)}";
+
+  if (minDiff == 0 && maxDiff == 0) return 'Konkurencja: ta sama cena';
+  if (maxDiff <= 0) return "Konkurencja taniej o ${range(maxDiff, minDiff)} zł";
+  if (minDiff >= 0) return "Konkurencja drożej o ${range(minDiff, maxDiff)} zł";
+  return "Konkurencja: od ${amount(minDiff)} zł taniej do ${amount(maxDiff)} zł drożej";
+}
+
 /// "1 wariant", "3 warianty", "5 wariantów".
 String variantsLabel(int count) {
   final mod10 = count % 10;
@@ -20,6 +37,14 @@ String variantsLabel(int count) {
   if (count == 1) return '1 wariant';
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return '$count warianty';
   return '$count wariantów';
+}
+
+String productsLabel(int count) {
+  final mod10 = count % 10;
+  final mod100 = count % 100;
+  if (count == 1) return '1 produkt';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return '$count produkty';
+  return '$count produktów';
 }
 
 Widget _thumbnail(String imageUrl, ColorScheme colorScheme) {
@@ -57,20 +82,14 @@ class ProductRow extends StatelessWidget {
     return prices.map<Widget>((entry) {
       final num? competitorPrice = toNum(entry['price']);
       final num? difference = toNum(entry['difference']);
-      final num? percent = toNum(entry['difference_percent']);
       final Color color = difference == null || difference == 0
           ? colorScheme.onSurfaceVariant
           : (difference > 0 ? Colors.green.shade700 : colorScheme.error);
 
-      final details = [
-        if (difference != null) signed(difference, ' zł'),
-        if (percent != null) signed(percent, '%'),
-      ].join(', ');
-
       return Padding(
         padding: const EdgeInsets.only(top: 4),
         child: Text(
-          "${entry['store']}: ${price(competitorPrice)}${details.isNotEmpty ? ' ($details)' : ''}",
+          "${entry['store']}: ${price(competitorPrice)}${difference != null ? ' (${differenceLabel(difference)})' : ''}",
           style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
         ),
       );
@@ -163,8 +182,8 @@ class ProductGroupTile extends StatelessWidget {
     final int total = int.tryParse('${group['variants_total'] ?? matching}') ?? matching;
     final num? minPrice = toNum(group['min_price']);
     final num? maxPrice = toNum(group['max_price']);
-    final num? minDiff = toNum(group['min_diff_pct']);
-    final num? maxDiff = toNum(group['max_diff_pct']);
+    final num? minDiff = toNum(group['min_diff']);
+    final num? maxDiff = toNum(group['max_diff']);
 
     final String prices = minPrice != null && maxPrice != null && minPrice != maxPrice
         ? "${minPrice.toStringAsFixed(2)} – ${price(maxPrice)}"
@@ -174,9 +193,7 @@ class ProductGroupTile extends StatelessWidget {
     String? differences;
     Color differenceColor = colorScheme.onSurfaceVariant;
     if (minDiff != null && maxDiff != null) {
-      differences = minDiff == maxDiff
-          ? "Konkurencja: ${signed(minDiff, '%')}"
-          : "Konkurencja: od ${signed(minDiff, '%')} do ${signed(maxDiff, '%')}";
+      differences = groupDifferenceLabel(minDiff, maxDiff);
       if (minDiff > 0) differenceColor = Colors.green.shade700;
       if (maxDiff < 0) differenceColor = colorScheme.error;
     }
