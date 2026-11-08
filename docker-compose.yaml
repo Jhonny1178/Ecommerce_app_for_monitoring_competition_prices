@@ -57,6 +57,8 @@ x-airflow-common:
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?ustaw AIRFLOW_DB_PASSWORD w .env}@postgres/airflow
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?ustaw AIRFLOW_DB_PASSWORD w .env}@postgres/airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}@redis:6379/0
+    # Domyślnie 6 h: dłuższe zadanie (scraper do 10,5 h) Redis wysłałby do workera drugi raz.
+    AIRFLOW__CELERY_BROKER_TRANSPORT_OPTIONS__VISIBILITY_TIMEOUT: '43200'
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -77,6 +79,8 @@ x-airflow-common:
     APP_DB_NAME: ${APP_DB_NAME}
     APP_DB_USER: ${APP_DB_USER}
     APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    # Scrapery pomijane przez pipeline (po przecinku); ta sama wartość trafia do webapp (panel admina).
+    PAUSED_SPIDERS: ${PAUSED_SPIDERS:-jmbdesing}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./processors:/opt/airflow/dags/processors
@@ -147,7 +151,8 @@ services:
 
   airflow-webserver:
     <<: *airflow-common
-    command: webserver
+    # Stary plik PID po restarcie Dockera blokuje start webservera.
+    command: bash -c "rm -f /opt/airflow/airflow-webserver.pid && exec airflow webserver"
     ports:
       - "127.0.0.1:8081:8080"
     healthcheck:
@@ -448,6 +453,7 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - CLIENT_PASSWORD=${CLIENT_PASSWORD:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - PAUSED_SPIDERS=${PAUSED_SPIDERS:-jmbdesing}
       - RATELIMIT_STORAGE_URI=redis://:${REDIS_PASSWORD:?ustaw REDIS_PASSWORD w .env}@redis:6379/1
     restart: always
     depends_on:

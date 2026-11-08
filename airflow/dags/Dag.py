@@ -67,11 +67,12 @@ SCRAPER_FAIL_DAG_ON_ERROR = os.environ.get(
 ).lower() in ("1", "true", "yes", "y")
 
 SCRAPY_CLOSE_TIMEOUT_SECONDS = int(
-    os.environ.get("SCRAPY_CLOSE_TIMEOUT_SECONDS", "5400")
+    os.environ.get("SCRAPY_CLOSE_TIMEOUT_SECONDS", "36000")
 )
 
+# 30 min zapasu ponad limit scrapy, żeby zdążył zamknąć się sam i zapisać statystyki.
 SCRAPER_TASK_TIMEOUT_MINUTES = int(
-    os.environ.get("SCRAPER_TASK_TIMEOUT_MINUTES", "120")
+    os.environ.get("SCRAPER_TASK_TIMEOUT_MINUTES", "630")
 )
 
 INGEST_RETRIES = int(os.environ.get("INGEST_RETRIES", "3"))
