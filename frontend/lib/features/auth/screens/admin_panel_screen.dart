@@ -641,7 +641,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                         borderRadius: BorderRadius.circular(8),
                         color: colorScheme.surfaceContainerLowest,
                       ),
-                      child: Text(log['message'] ?? 'Brak treści'),
+                      child: SelectableText(log['message'] ?? 'Brak treści'),
                     ),
                   ],
                 ),
@@ -795,9 +795,46 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
     );
   }
 
+  // Znacznik scrapera klienta: aktywny albo pomijany przez pipeline (wstrzymany / własny sklep).
+  Widget _buildScraperChip(Map scraper, ColorScheme colorScheme) {
+    final name = scraper['name']?.toString() ?? '-';
+    final state = scraper['state']?.toString();
+    final isActive = state == 'active';
+
+    final (label, tooltip) = switch (state) {
+      'paused' => ('$name · wstrzymany', 'Wstrzymany (PAUSED_SPIDERS): pipeline go pomija.'),
+      'own_store' => (
+          '$name · własny sklep',
+          'Własny sklep klienta: produkty klienta pochodzą z pliku feed, pipeline nie uruchamia tego scrapera.'
+        ),
+      _ => (name, 'Uruchamiany w każdym przebiegu pipeline\'u.'),
+    };
+
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        decoration: BoxDecoration(
+          color: isActive
+              ? colorScheme.primaryContainer.withOpacity(0.6)
+              : colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: isActive ? colorScheme.onPrimaryContainer : colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildDashboardTab(ColorScheme colorScheme) {
     final pendingCount = _users.length;
-    final activeScrapersCount = _scrapers.length;
+    final activeScrapersCount =
+        _scrapers.where((s) => s is Map && s['run_state'] == 'active').length;
     final supportedStoresCount = _stores.length;
 
     return Column(
@@ -1894,10 +1931,9 @@ Widget _buildScrapersTab(ColorScheme colorScheme) {
                         colorScheme,
                       );
 
-                      final scrapers =
-                          client['scrapers'] is List
-                              ? client['scrapers']
-                                  as List
+                      final scraperStates =
+                          client['scraper_states'] is List
+                              ? client['scraper_states'] as List
                               : <dynamic>[];
 
                       return DataRow(
@@ -1938,7 +1974,7 @@ Widget _buildScrapersTab(ColorScheme colorScheme) {
                                   ),
                                   const SizedBox(height: 3),
                                   Text(
-                                    '${client['scrapers_count'] ?? 0} scraperów',
+                                    'Aktywne: ${client['active_scrapers_count'] ?? 0} z ${client['scrapers_count'] ?? 0}',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: colorScheme.onSurfaceVariant,
@@ -1955,40 +1991,10 @@ Widget _buildScrapersTab(ColorScheme colorScheme) {
                               child: Wrap(
                                 spacing: 6,
                                 runSpacing: 6,
-                                children:
-                                    scrapers.map<Widget>(
-                                  (scraper) {
-                                    return Container(
-                                      padding:
-                                          const EdgeInsets
-                                              .symmetric(
-                                        horizontal: 9,
-                                        vertical: 4,
-                                      ),
-                                      decoration:
-                                          BoxDecoration(
-                                        color: colorScheme
-                                            .primaryContainer
-                                            .withOpacity(
-                                          0.6,
-                                        ),
-                                        borderRadius:
-                                            BorderRadius
-                                                .circular(
-                                          12,
-                                        ),
-                                      ),
-                                      child: Text(
-                                        scraper.toString(),
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: colorScheme
-                                              .onPrimaryContainer,
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ).toList(),
+                                children: scraperStates
+                                    .whereType<Map>()
+                                    .map<Widget>((scraper) => _buildScraperChip(scraper, colorScheme))
+                                    .toList(),
                               ),
                             ),
                           ),

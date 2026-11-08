@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 
 from utils import get_db, get_db_transaction, hash_password, verify_password, hash_token, admin_required, is_allowed_external_url, is_existing_website, session_fingerprint
 from services.provisioning import provision_client_from_request
+from services.spider_state import ACTIVE, spider_run_state
 from extensions import limiter, user_rate_key
 
 
@@ -2063,7 +2064,9 @@ def list_scrapers():
                     WHERE ptr.client_id = sr.client_id 
                       AND ptr.task_id IN (sr.spider_name, 'scraper_' || sr.spider_name, 'scrape_' || sr.spider_name)
                     ORDER BY ptr.started_at DESC LIMIT 1
-                ) as last_run_time
+                ) as last_run_time,
+                COALESCE(c.store_prefix, c.slug) AS client_prefix,
+                c.is_active AS client_is_active
             FROM scraper_registry sr
             LEFT JOIN clients c ON c.id = sr.client_id
             WHERE {where_sql}
@@ -2074,6 +2077,13 @@ def list_scrapers():
 
         cur.close()
         conn.close()
+
+        for scraper in scrapers:
+            scraper["run_state"] = spider_run_state(
+                scraper["spider_name"],
+                scraper.pop("client_prefix"),
+                bool(scraper.pop("client_is_active")),
+            )
 
         return jsonify({
             "ok": True,
@@ -2514,6 +2524,7 @@ def get_pipeline_clients():
                 c.id AS client_id,
                 c.name AS client_name,
                 c.slug AS client_slug,
+                COALESCE(c.store_prefix, c.slug) AS store_prefix,
 
                 COALESCE(
                     ARRAY_LENGTH(c.spiders_to_run, 1),
@@ -2575,6 +2586,16 @@ def get_pipeline_clients():
             )
 
             item["duration_seconds"] = duration_seconds
+
+            prefix = item.pop("store_prefix")
+            item["scraper_states"] = [
+                {"name": name, "state": spider_run_state(name, prefix)}
+                for name in item.get("scrapers") or []
+            ]
+            item["active_scrapers_count"] = sum(
+                1 for scraper in item["scraper_states"] if scraper["state"] == ACTIVE
+            )
+
             schedule_cron = os.environ.get(
                 "PIPELINE_SCHEDULE_CRON",
                 "0 9 * * *",
