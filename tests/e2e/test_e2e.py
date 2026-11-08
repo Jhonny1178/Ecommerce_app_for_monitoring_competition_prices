@@ -141,6 +141,46 @@ class TestUserJourneyE2E:
             assert stats_data.get("ok") is True
             assert "summary" in stats_data
 
+            resp_version = client_session.get(f"{WEBAPP_URL}/api/data_version", timeout=10)
+            assert resp_version.status_code == 200
+            version_data = resp_version.json()
+            assert version_data.get("ok") is True
+            assert "last_update" in version_data
+            assert requests.get(f"{WEBAPP_URL}/api/data_version", timeout=10).status_code == 401
+
+            report_url = f"{WEBAPP_URL}/api/products/{inserted_product_id}/report"
+            resp_report = client_session.post(report_url, json={
+                "topic": "comparison",
+                "reasons": ["wrong_match"],
+                "comment": "U konkurencji to inny kolor",
+                "offer": {"store": "Calavado", "sku": "C-1", "price": 249.0, "url": "https://example.com/c"},
+            }, timeout=10)
+            assert resp_report.status_code == 200, f"Błąd zgłoszenia: {resp_report.text}"
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT category, error_code, message FROM error_logs WHERE client_id = %s ORDER BY id DESC LIMIT 1",
+                    (client_id,),
+                )
+                category, error_code, message = cur.fetchone()
+            assert category == "Klient" and error_code == "Porównanie z konkurencją"
+            assert "Testowa Kołdra Puchowa E2E" in message
+            assert "To inny produkt (złe dopasowanie)" in message
+            assert "Calavado — " in message and "Opis klienta: U konkurencji to inny kolor" in message
+            assert client_session.post(report_url, json={"topic": "comparison", "reasons": ["nieznany"]}, timeout=10).status_code == 400
+            assert requests.post(report_url, json={"topic": "other", "comment": "x"}, timeout=10).status_code == 401
+
+            resp_dashboard = client_session.get(f"{WEBAPP_URL}/api/dashboard", timeout=10)
+            assert resp_dashboard.status_code == 200, f"Błąd Dashboardu: {resp_dashboard.text}"
+            dashboard = resp_dashboard.json()
+            assert dashboard["ok"] is True and dashboard["risk_threshold_pct"] == 50
+            assert dashboard["summary"]["total_products"] == 1
+            assert dashboard["summary"]["matched_products"] == 0
+            resp_risky = client_session.get(
+                f"{WEBAPP_URL}/api/products?matched_only=true&group=true&risk=high", timeout=10
+            )
+            assert resp_risky.status_code == 200 and resp_risky.json()["pagination"]["total_items"] == 0
+            assert requests.get(f"{WEBAPP_URL}/api/dashboard", timeout=10).status_code == 401
+
             resp_blocked_url = pre_session.post(
                 f"{WEBAPP_URL}/api/upload_onboarding_file",
                 data={"source_type": "url", "file_format": "csv", "source_url": "http://127.0.0.1:8080/x.csv"},

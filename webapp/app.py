@@ -18,6 +18,8 @@ from manage_users import sync_shared_passwords_from_env
 from routes.products import products_bp
 from routes.auth import auth_bp
 from routes.changes import changes_bp
+from routes.reports import reports_bp
+from routes.dashboard import dashboard_bp
 from datetime import timedelta
 
 load_dotenv()
@@ -38,7 +40,8 @@ if len(app.secret_key) < 32:
     )
 
 app.config.update(
-    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    # Sesja przeżywa zamknięcie przeglądarki; wygasa po 7 dniach bez aktywności.
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
     SESSION_REFRESH_EACH_REQUEST=True,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -754,6 +757,8 @@ def admin_upload_confirm():
 app.register_blueprint(products_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(changes_bp)
+app.register_blueprint(reports_bp)
+app.register_blueprint(dashboard_bp)
 
 sync_shared_passwords_from_env()
 

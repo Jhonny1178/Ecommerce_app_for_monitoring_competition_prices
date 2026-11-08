@@ -1,4 +1,5 @@
 from flask import Blueprint, jsonify, session, request, Response
+from datetime import datetime, timedelta
 import math
 import psycopg2
 import psycopg2.extras
@@ -292,6 +293,8 @@ _CLIENT_PRICE_SQL = sql.SQL("(CASE WHEN p.price_special > 0 THEN p.price_special
 
 PRICE_DIFF_DIRECTIONS = {"higher", "lower"}
 PRICE_DIFF_UNITS = {"pln", "percent"}
+# Różnica ceny powyżej tylu % to podejrzane dopasowanie: filtr na liście i pomijanie w statystykach Dashboardu.
+HIGH_RISK_DIFF_PCT = 50
 
 
 def _competitor_price_sql(price_column: str, special_column: str | None):
@@ -308,7 +311,8 @@ def _competitor_price_sql(price_column: str, special_column: str | None):
 
 
 def _price_difference_lateral(match_columns: set[str], matches_table: str, store: str | None,
-                              direction: str, diff_min: float | None, diff_max: float | None, unit: str):
+                              direction: str, diff_min: float | None, diff_max: float | None, unit: str,
+                              high_risk: bool = False):
     """Złączenie "d" z różnicami cen produktu p (cena konkurencji - cena klienta).
 
     Liczy tylko ceny spełniające filtr: qualifying, max_abs_diff, max_abs_pct,
@@ -343,6 +347,10 @@ def _price_difference_lateral(match_columns: set[str], matches_table: str, store
         conditions.append(sql.SQL("{} <= %s").format(amount))
         params.append(diff_max)
 
+    if high_risk:
+        conditions.append(sql.SQL("ABS({}) > %s").format(percent))
+        params.append(HIGH_RISK_DIFF_PCT)
+
     lateral = sql.SQL("""
         LEFT JOIN LATERAL (
             SELECT
@@ -350,7 +358,9 @@ def _price_difference_lateral(match_columns: set[str], matches_table: str, store
                 MAX(ABS({difference})) AS max_abs_diff,
                 MAX(ABS({percent})) AS max_abs_pct,
                 MIN({percent}) AS min_diff_pct,
-                MAX({percent}) AS max_diff_pct
+                MAX({percent}) AS max_diff_pct,
+                MIN({difference}) AS min_diff,
+                MAX({difference}) AS max_diff
             FROM {matches} m
             CROSS JOIN LATERAL (VALUES {prices}) AS c(price)
             WHERE m.client_sku = p.sku
@@ -471,6 +481,18 @@ def _flat_has_competitor_sql(match_columns: set[str]):
     )
 
 
+def _flat_competitor_count_sql(match_columns: set[str]):
+    """Liczba sklepów z ceną w wierszu płaskiej tabeli (jeden wiersz na wariant, kolumny na sklep)."""
+    price_cols = _flat_competitor_price_columns(match_columns)
+
+    if not price_cols:
+        return None
+
+    return sql.SQL("num_nonnulls({})").format(
+        sql.SQL(", ").join(sql.Identifier(col) for col in price_cols)
+    )
+
+
 def _fetch_match_counts(cur, matches_table: str, products: list[dict]) -> dict:
     if not products or not _table_exists(cur, matches_table):
         return {}
@@ -503,39 +525,24 @@ def _fetch_match_counts(cur, matches_table: str, products: list[dict]) -> dict:
     if has_competitor_sql is None:
         return {}
 
-    if "client_sku" in match_columns:
-        skus = [p["sku"] for p in products if p.get("sku")]
+    for sku_column in ("client_sku", "product_sku"):
+        if sku_column not in match_columns:
+            continue
 
+        skus = [p["sku"] for p in products if p.get("sku")]
         query = sql.SQL("""
-            SELECT client_sku AS key, COUNT(*) AS count
-            FROM {}
-            WHERE client_sku = ANY(%s)
-              AND ({})
-            GROUP BY client_sku
+            SELECT {sku} AS key, MAX({count}) AS count
+            FROM {table}
+            WHERE {sku} = ANY(%s)
+            GROUP BY {sku}
         """).format(
-            sql.Identifier(matches_table),
-            has_competitor_sql,
+            sku=sql.Identifier(sku_column),
+            count=_flat_competitor_count_sql(match_columns),
+            table=sql.Identifier(matches_table),
         )
 
         cur.execute(query, (skus,))
-        return {row["key"]: row["count"] for row in cur.fetchall()}
-
-    if "product_sku" in match_columns:
-        skus = [p["sku"] for p in products if p.get("sku")]
-
-        query = sql.SQL("""
-            SELECT product_sku AS key, COUNT(*) AS count
-            FROM {}
-            WHERE product_sku = ANY(%s)
-              AND ({})
-            GROUP BY product_sku
-        """).format(
-            sql.Identifier(matches_table),
-            has_competitor_sql,
-        )
-
-        cur.execute(query, (skus,))
-        return {row["key"]: row["count"] for row in cur.fetchall()}
+        return {row["key"]: row["count"] for row in cur.fetchall() if row["count"]}
 
     if "product_name" in match_columns:
         names = [p["name"] for p in products if p.get("name")]
@@ -1172,7 +1179,9 @@ def api_products():
     if (price_diff and price_diff not in PRICE_DIFF_DIRECTIONS) or diff_unit not in PRICE_DIFF_UNITS:
         return jsonify({"ok": False, "error": "Nieprawidłowy filtr różnicy ceny"}), 400
 
-    price_diff_filter_active = bool(price_diff) or diff_min is not None or diff_max is not None
+    # risk=high: tylko produkty z ofertą różniącą się o ponad HIGH_RISK_DIFF_PCT % (podejrzane dopasowania).
+    high_risk = request.args.get("risk", "").strip().lower() == "high"
+    price_diff_filter_active = bool(price_diff) or diff_min is not None or diff_max is not None or high_risk
 
     group_mode = request.args.get("group", "false").lower() == "true"
     group_name = request.args.get("group_name")
@@ -1259,7 +1268,7 @@ def api_products():
 
         if min_matches and min_matches > 0 and _table_exists(cursor, matches_table):
             match_columns = _get_columns(cursor, matches_table)
-            has_competitor_sql = _flat_has_competitor_sql(match_columns)
+            count_sql = _flat_competitor_count_sql(match_columns)
 
             if "product_id" in match_columns:
                 if "competitor_product_id" in match_columns:
@@ -1267,11 +1276,11 @@ def api_products():
                 else:
                     where_parts.append(sql.SQL("p.id IN (SELECT product_id FROM {} GROUP BY product_id HAVING COUNT(*) >= %s)").format(sql.Identifier(matches_table)))
                 params.append(min_matches)
-            elif has_competitor_sql is not None and "client_sku" in match_columns:
-                where_parts.append(sql.SQL("p.sku IN (SELECT client_sku FROM {} WHERE {} GROUP BY client_sku HAVING COUNT(*) >= %s)").format(sql.Identifier(matches_table), has_competitor_sql))
+            elif count_sql is not None and "client_sku" in match_columns:
+                where_parts.append(sql.SQL("p.sku IN (SELECT client_sku FROM {} WHERE {} >= %s)").format(sql.Identifier(matches_table), count_sql))
                 params.append(min_matches)
-            elif has_competitor_sql is not None and "product_sku" in match_columns:
-                where_parts.append(sql.SQL("p.sku IN (SELECT product_sku FROM {} WHERE {} GROUP BY product_sku HAVING COUNT(*) >= %s)").format(sql.Identifier(matches_table), has_competitor_sql))
+            elif count_sql is not None and "product_sku" in match_columns:
+                where_parts.append(sql.SQL("p.sku IN (SELECT product_sku FROM {} WHERE {} >= %s)").format(sql.Identifier(matches_table), count_sql))
                 params.append(min_matches)
             else:
                 where_parts.append(sql.SQL("FALSE"))
@@ -1287,6 +1296,7 @@ def api_products():
                 diff_min,
                 diff_max,
                 diff_unit,
+                high_risk=high_risk,
             )
 
         if price_diff_filter_active:
@@ -1354,10 +1364,11 @@ def _grouped_products_response(cursor, products_table, from_sql, params, has_dif
                                matched_filter, sort_by, order, page, per_page):
     """Kafelki: jeden wiersz na produkt z liczbą wariantów i zakresem cen oraz różnic."""
     differences = (
-        sql.SQL("d.max_abs_diff, d.max_abs_pct, d.min_diff_pct, d.max_diff_pct")
+        sql.SQL("d.max_abs_diff, d.max_abs_pct, d.min_diff_pct, d.max_diff_pct, d.min_diff, d.max_diff")
         if has_differences
         else sql.SQL("NULL::float AS max_abs_diff, NULL::float AS max_abs_pct, "
-                     "NULL::float AS min_diff_pct, NULL::float AS max_diff_pct")
+                     "NULL::float AS min_diff_pct, NULL::float AS max_diff_pct, "
+                     "NULL::float AS min_diff, NULL::float AS max_diff")
     )
     variants = sql.SQL("""
         SELECT p.id, p.name, p.manufacturer, p.category, p.image,
@@ -1387,7 +1398,8 @@ def _grouped_products_response(cursor, products_table, from_sql, params, has_dif
                COUNT(*) AS variants_matching,
                MIN(display_price) AS min_price, MAX(display_price) AS max_price,
                MAX(max_abs_diff) AS max_abs_diff, MAX(max_abs_pct) AS max_abs_pct,
-               MIN(min_diff_pct) AS min_diff_pct, MAX(max_diff_pct) AS max_diff_pct
+               MIN(min_diff_pct) AS min_diff_pct, MAX(max_diff_pct) AS max_diff_pct,
+               MIN(min_diff) AS min_diff, MAX(max_diff) AS max_diff
         FROM v
         GROUP BY group_name, group_maker
         ORDER BY {sort} {order} NULLS LAST, group_name, group_maker
@@ -1435,6 +1447,9 @@ def _grouped_products_response(cursor, products_table, from_sql, params, has_dif
             "max_abs_pct": _rounded(group["max_abs_pct"], 1),
             "min_diff_pct": _rounded(group["min_diff_pct"], 1),
             "max_diff_pct": _rounded(group["max_diff_pct"], 1),
+            # Różnica w zł (cena konkurencji - cena klienta), od najmniejszej do największej.
+            "min_diff": _rounded(group["min_diff"]),
+            "max_diff": _rounded(group["max_diff"]),
         })
 
     return jsonify({
@@ -1534,6 +1549,122 @@ def api_product_detail(product_id):
         if conn:
             conn.close()
 
+def _fetch_price_history_rows(cur, competitors: list[dict], history_table: str) -> list[dict]:
+    """Zmiany cen ofert konkurencji dopasowanych do produktu, od najnowszej."""
+    history_rows = []
+    used_pairs = set()
+
+    for competitor in competitors:
+        competitor_sku = competitor.get("sku")
+        competitor_store = competitor.get("store")
+
+        if not competitor_sku or not competitor_store:
+            continue
+
+        # Historia ma 'podpierzyna', dopasowania 'pod_pierzyna'.
+        pair_key = (competitor_sku, _store_key(competitor_store))
+
+        if pair_key in used_pairs:
+            continue
+
+        used_pairs.add(pair_key)
+
+        cur.execute(
+            sql.SQL("""
+                SELECT
+                    sku,
+                    store,
+                    price_normal_old,
+                    price_normal_new,
+                    price_special_old,
+                    price_special_new,
+                    valid_from,
+                    valid_to,
+                    is_current
+                FROM {}
+                WHERE sku = %s
+                ORDER BY valid_from DESC
+            """).format(sql.Identifier(history_table)),
+            (competitor_sku,)
+        )
+
+        rows = [
+            row for row in cur.fetchall()
+            if _store_key(row["store"]) == pair_key[1]
+        ]
+
+        for row in rows:
+            row = dict(row)
+
+            old_display_price = _effective_price(
+                row.get("price_normal_old"),
+                row.get("price_special_old"),
+            )
+
+            new_display_price = _effective_price(
+                row.get("price_normal_new"),
+                row.get("price_special_new"),
+            )
+
+            difference = (
+                round(float(new_display_price) - float(old_display_price), 2)
+                if old_display_price is not None and new_display_price is not None
+                else None
+            )
+
+            history_rows.append({
+                "sku": row.get("sku"),
+                "store": competitor_store,
+                "name": competitor.get("name"),
+                "url": competitor.get("url"),
+                "image": competitor.get("image"),
+
+                "price_normal_old": row.get("price_normal_old"),
+                "price_normal_new": row.get("price_normal_new"),
+                "price_special_old": row.get("price_special_old"),
+                "price_special_new": row.get("price_special_new"),
+
+                "old_display_price": old_display_price,
+                "new_display_price": new_display_price,
+                "difference": difference,
+
+                "valid_from": row.get("valid_from").isoformat() if row.get("valid_from") else None,
+                "valid_to": row.get("valid_to").isoformat() if row.get("valid_to") else None,
+                "is_current": row.get("is_current"),
+            })
+
+    # Od najnowszej zmiany.
+    history_rows.sort(key=lambda item: item["valid_from"] or "", reverse=True)
+    return history_rows
+
+
+def _recent_price_changes(history_rows: list[dict], days: int = 30) -> list[dict]:
+    """Ostatnia zmiana ceny każdej oferty z ostatnich `days` dni, w formacie serwisu rekomendacji."""
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    changes = []
+    seen = set()
+
+    for row in history_rows:
+        key = (row["sku"], _store_key(row["store"]))
+        old, new = row.get("old_display_price"), row.get("new_display_price")
+
+        if key in seen or not row.get("valid_from") or row["valid_from"] < cutoff:
+            continue
+        seen.add(key)
+
+        if old is None or new is None or abs(float(new) - float(old)) < 0.005:
+            continue
+
+        changes.append({
+            "sklep": str(row["store"]).replace("_", " ").title(),
+            "cena_przed": float(old),
+            "cena_po": float(new),
+            "data": row["valid_from"][:10],
+        })
+
+    return changes
+
+
 @products_bp.route("/api/products/<int:product_id>/price-history")
 @login_required
 def api_product_price_history(product_id: int):
@@ -1615,90 +1746,7 @@ def api_product_price_history(product_id: int):
                 "message": "Produkt nie ma dopasowanych ofert konkurencji"
             })
 
-        history_rows = []
-        used_pairs = set()
-
-        for competitor in competitors:
-            competitor_sku = competitor.get("sku")
-            competitor_store = competitor.get("store")
-
-            if not competitor_sku or not competitor_store:
-                continue
-
-            # Historia ma 'podpierzyna', dopasowania 'pod_pierzyna'.
-            pair_key = (competitor_sku, _store_key(competitor_store))
-
-            if pair_key in used_pairs:
-                continue
-
-            used_pairs.add(pair_key)
-
-            cur.execute(
-                sql.SQL("""
-                    SELECT
-                        sku,
-                        store,
-                        price_normal_old,
-                        price_normal_new,
-                        price_special_old,
-                        price_special_new,
-                        valid_from,
-                        valid_to,
-                        is_current
-                    FROM {}
-                    WHERE sku = %s
-                    ORDER BY valid_from DESC
-                """).format(sql.Identifier(history_table)),
-                (competitor_sku,)
-            )
-
-            rows = [
-                row for row in cur.fetchall()
-                if _store_key(row["store"]) == pair_key[1]
-            ]
-
-            for row in rows:
-                row = dict(row)
-
-                old_display_price = _effective_price(
-                    row.get("price_normal_old"),
-                    row.get("price_special_old"),
-                )
-
-                new_display_price = _effective_price(
-                    row.get("price_normal_new"),
-                    row.get("price_special_new"),
-                )
-
-                difference = (
-                    round(float(new_display_price) - float(old_display_price), 2)
-                    if old_display_price is not None and new_display_price is not None
-                    else None
-                )
-
-                history_rows.append({
-                    "sku": row.get("sku"),
-                    "store": competitor_store,
-                    "name": competitor.get("name"),
-                    "url": competitor.get("url"),
-                    "image": competitor.get("image"),
-
-                    "price_normal_old": row.get("price_normal_old"),
-                    "price_normal_new": row.get("price_normal_new"),
-                    "price_special_old": row.get("price_special_old"),
-                    "price_special_new": row.get("price_special_new"),
-
-                    "old_display_price": old_display_price,
-                    "new_display_price": new_display_price,
-                    "difference": difference,
-
-                    "valid_from": row.get("valid_from").isoformat() if row.get("valid_from") else None,
-                    "valid_to": row.get("valid_to").isoformat() if row.get("valid_to") else None,
-                    "is_current": row.get("is_current"),
-                })
-
-        # Od najnowszej zmiany.
-        history_rows.sort(key=lambda item: item["valid_from"] or "", reverse=True)
+        history_rows = _fetch_price_history_rows(cur, competitors, history_table)
 
         return jsonify({
             "ok": True,
@@ -1769,6 +1817,13 @@ def api_product_recommend(product_id):
             "lista_rynkowa": prices,
             "nasza_cena": our_price
         }
+
+        # Historię dokładamy tylko, gdy istnieje i klient ma do niej dostęp; brak historii = brak pola.
+        history_table = f"{prefix}_competitors_history"
+        if _has_price_history_access(_get_current_user_subscription_plan(cursor)) and _table_exists(cursor, history_table):
+            changes = _recent_price_changes(_fetch_price_history_rows(cursor, competitors, history_table))
+            if changes:
+                payload["historia_cen"] = changes
 
         import requests
         response = requests.post("http://recommendation_service:8000/api/oblicz-cene", json=payload, timeout=30)
@@ -1948,6 +2003,46 @@ def api_stats():
             "by_category": by_category,
             "by_store": by_store,
             "by_availability": by_availability,
+        })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@products_bp.route("/api/data_version")
+@login_required
+def api_data_version():
+    """Koniec ostatniego przebiegu pipeline'u klienta; frontend po zmianie pokazuje pasek „Są nowe dane”."""
+    client_id = session.get("client_id")
+
+    if not client_id:
+        return jsonify({"ok": True, "last_update": None})
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        # Liczą się też przebiegi 'failed': matching (ALL_DONE) odświeża dane mimo błędu scrapera.
+        cursor.execute(
+            "SELECT MAX(finished_at) FROM pipeline_runs WHERE client_id = %s AND finished_at IS NOT NULL",
+            (client_id,),
+        )
+        last_update = cursor.fetchone()[0]
+
+        return jsonify({
+            "ok": True,
+            "last_update": last_update.isoformat() if last_update else None,
         })
 
     except Exception as e:
