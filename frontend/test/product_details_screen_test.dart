@@ -8,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:tonten/core/api/api_client.dart';
 import 'package:tonten/features/auth/screens/subscription_screen.dart';
 import 'package:tonten/features/products/screens/product_details_screen.dart';
+import 'package:tonten/features/products/widgets/report_issue_sheet.dart';
 
 void main() {
   tearDown(ApiClient.resetClient);
@@ -45,6 +46,33 @@ void main() {
 
     expect(find.text('SKU: 15133-R | Rozmiar: 155x200 | Kolor: zielony'), findsOneWidget);
     expect(find.byKey(const Key('client_product_link')), findsOneWidget);
+  });
+
+  testWidgets('"Zgłoś" przy ofercie otwiera panel zgłoszenia z wybraną ofertą', (tester) async {
+    desktopWindow(tester);
+    ApiClient.setClient(MockClient((request) async {
+      if (request.url.path == '/api/me') return json({'ok': true, 'user': {'subscription_plan': 'Basic'}});
+      if (request.url.path.endsWith('/price-history')) return json({'ok': true, 'data': []});
+      return json({
+        'ok': true,
+        'data': {'id': 42, 'name': 'Kołdra Hefel', 'sku': 'K-1', 'display_price': 825.0},
+        'competitors': [
+          {'store': 'calavado', 'name': 'Kołdra C', 'sku': 'C-1', 'display_price': 794.9, 'price_difference': -30.1},
+          {'store': 'pod_pierzyna', 'name': 'Kołdra P', 'sku': 'P-1', 'display_price': 825.0, 'price_difference': 0},
+        ],
+      });
+    }));
+
+    await tester.pumpWidget(const MaterialApp(home: ProductDetailsScreen(productId: 42)));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('report_issue_button')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('report_offer_button_1')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ReportIssueSheet), findsOneWidget);
+    expect(tester.widget<ChoiceChip>(find.byKey(const Key('report_topic_comparison'))).selected, isTrue);
+    expect(tester.widget<ChoiceChip>(find.byKey(const Key('report_offer_1'))).selected, isTrue);
   });
 
   testWidgets('bez adresu produktu nie ma linku', (tester) async {

@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:tonten/core/api/api_client.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../auth/screens/subscription_screen.dart';
+import '../widgets/report_issue_sheet.dart';
 
 /// Adres produktu klienta bez dopisku feedu (".feed10000.html").
 String clientProductUrl(String? url) => (url ?? '').replaceFirst(RegExp(r'\.feed\d+\.html$'), '.html');
@@ -163,6 +164,43 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     }
   }
 
+  List<ReportOffer> get _reportOffers => _competitors
+      .map((comp) => ReportOffer(
+            store: comp['shop_label']?.toString() ?? comp['store']?.toString() ?? 'Nieznany sklep',
+            sku: comp['sku']?.toString(),
+            name: comp['comp_name']?.toString() ?? comp['name']?.toString(),
+            url: comp['url']?.toString(),
+            price: _toNum(comp['display_price'] ??
+                comp['comp_price_special'] ??
+                comp['price_special'] ??
+                comp['comp_price_normal'] ??
+                comp['price_normal']),
+          ))
+      .toList();
+
+  // Jeden panel zgłoszeń dla całego widoku; przyciski przy ofercie i rekomendacji od razu wybierają temat.
+  void _openReport({ReportTopic? topic, int? offerIndex}) {
+    showReportIssueSheet(
+      context,
+      productId: widget.productId,
+      productName: _product?['name']?.toString() ?? 'Produkt',
+      offers: _reportOffers,
+      recommendation: _recommendedPrice != null
+          ? ReportRecommendation(price: _recommendedPrice!, reason: _recommendationReason ?? '')
+          : null,
+      topic: topic,
+      offerIndex: offerIndex,
+    );
+  }
+
+  ButtonStyle _smallReportButtonStyle(ColorScheme colorScheme) => TextButton.styleFrom(
+        foregroundColor: colorScheme.onSurfaceVariant,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+      );
+
   // ---- NAPRAWIONA FUNKCJA Z OBSŁUGĄ BŁĘDÓW ----
   Future<void> _getRecommendation() async {
     if (mounted) setState(() => _isRecommending = true);
@@ -232,6 +270,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         elevation: 0,
         centerTitle: false,
         actions: [
+          if (_product != null)
+            TextButton.icon(
+              key: const Key('report_issue_button'),
+              onPressed: () => _openReport(),
+              icon: const Icon(Icons.flag_outlined, size: 20),
+              label: const Text('Zgłoś błąd'),
+            ),
+          const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.refresh, size: 28),
             tooltip: 'Odśwież',
@@ -977,6 +1023,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                 ),
                               ),
                             ],
+                            const SizedBox(height: 4),
+                            TextButton.icon(
+                              key: Key('report_offer_button_$index'),
+                              onPressed: () => _openReport(topic: ReportTopic.comparison, offerIndex: index),
+                              style: _smallReportButtonStyle(colorScheme),
+                              icon: const Icon(Icons.flag_outlined, size: 14),
+                              label: const Text('Zgłoś', style: TextStyle(fontSize: 11)),
+                            ),
                           ],
                         ),
                       ],
@@ -1074,7 +1128,18 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   color: colorScheme.onSecondaryContainer,
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: const Key('report_recommendation_button'),
+                  onPressed: () => _openReport(topic: ReportTopic.recommendation),
+                  style: _smallReportButtonStyle(colorScheme),
+                  icon: const Icon(Icons.flag_outlined, size: 14),
+                  label: const Text('Zgłoś problem z rekomendacją', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+              const SizedBox(height: 16),
             ] else ...[
               Text(
                 hasMatches
