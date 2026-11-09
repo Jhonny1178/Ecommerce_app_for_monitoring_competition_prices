@@ -34,3 +34,6 @@ ecommerce_price_comparer/spiders/**/*.txt
 ecommerce_price_comparer/spiders/calvado_com/
 /Praca dyplomowa/
 /CLAUDE.md
+nasz_klient_size_prices.sql
+usun_stare_produkty.sql
+
